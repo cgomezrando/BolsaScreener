@@ -10,7 +10,7 @@ workflows:
       vars:
         BUNDLE_ID: com.cgr.bolsascreener
         P12_PASSWORD: TempBuildPass123
-      flutter: 3.35.4
+      flutter: 3.47.6
       xcode: 26.6
       cocoapods: default
 
