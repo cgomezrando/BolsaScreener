@@ -450,6 +450,12 @@ List<_Field> _buildFields() {
       dec: 1, h: 'Short % float');
   n('short_ratio', 'Días para cubrir (solo EE. UU.)', _cCor,
       dec: 1, h: 'Días para cubrir');
+  n('borrow_fee', 'Tasa de préstamo IBKR, % anual', _cCor,
+      h: 'Tasa préstamo %');
+  n('borrow_avail', 'Acciones disponibles para préstamo (IBKR)', _cCor,
+      dec: 0, w: 96, h: 'Disponibles préstamo');
+  n('borrow_x', 'Disponibles para préstamo / tus acciones (veces)', _cCor,
+      dec: 1, h: 'Préstamo / posición');
   n('short_pub', 'Cortos publicados CNMV, % del capital (solo España)', _cCor,
       dec: 2, h: 'Cortos CNMV %');
   n('short_n', 'Fondos con cortos publicados CNMV (solo España)', _cCor,
@@ -506,6 +512,8 @@ const Map<String, List<String>> _kDefaultCols = {
     'earn_bd',
     'div_yield',
     'days_to_exdiv',
+    'borrow_fee',
+    'borrow_x',
     'short_float',
     'short_pub'
   ],
@@ -537,9 +545,14 @@ const Map<String, String> _kHelp = {
       'Distancia del stop en ATRs. Menos de 1 = el stop puede saltar por ruido; 1,5 o más es holgado.',
   'p_rr': 'Recorrido hasta el objetivo dividido por la distancia al stop. El objetivo es el siguiente '
       'máximo relevante (mínimo en cortos), como mucho a 2,5 ATR de la entrada.',
-  'swing_ok':
-      'Precio y EMAs en orden, resultados a más de 21 días, stop ≥ 1 ATR, B/R ≥ 1,5, '
-          'volumen ≥ 50 M, riesgo usado ≥ 60 % y precio no fijado.',
+  'swing_ok': 'Largos: precio y EMAs en orden, resultados a más de 21 días, stop ≥ 1 ATR, B/R ≥ 1,5, '
+      'volumen ≥ 50 M\$, riesgo usado ≥ 60 %, precio no fijado y, en EE. UU., capitalización ≥ 2.000 M\$. '
+      'Cortos: igual pero con resultados a más de 14 días, volumen ≥ 100 M\$, precio ≥ 10 \$, '
+      'capitalización ≥ 5.000 M\$ en EE. UU., sin '
+      'ex-dividendo en los próximos 14 días, préstamo disponible ≥ 5× tu posición y tasa ≤ 1 % anual.',
+  'borrow_fee':
+      'Coste anual de pedir prestadas las acciones en IBKR. Por encima del 1 % se come buena '
+          'parte del recorrido de dos semanas.',
   'pinned':
       'ATR menor del 0,6 % y rango de 20 sesiones menor del 2 %: suele ser una OPA en efectivo.',
   'p_risk_pct':
@@ -804,6 +817,17 @@ double? _d(dynamic v) => v is num ? v.toDouble() : null;
 String _cur(Map<String, dynamic> r) => r['currency'] == 'EUR' ? '€' : '\$';
 
 const double _kTargetAtrCap = 2.5;
+const int _kEarnDaysLong = 21;
+const int _kEarnDaysShort = 14;
+// Cortos: liquidez y tamaño mínimos (en dólares; los europeos se convierten con EUR/USD)
+const double _kShortMinDvolM = 100;
+const double _kShortMinPrice = 10;
+const double _kShortMinMcapB = 5; // solo valores de EE. UU.
+const double _kLongMinMcapB = 2; // solo valores de EE. UU.
+const int _kShortExDivDays = 14;
+const double _kShortMinBorrowX = 5;
+const double _kShortMaxBorrowFee = 1.0;
+const double _kLongMinDvolM = 50;
 
 const Set<String> _kMoneyKeys = {
   'price',
@@ -939,6 +963,10 @@ Color? _colorFor(_Field f, dynamic v) {
         return v <= 21 ? _kRed : null;
       case 'score':
         return v >= 70 ? _kGreen : (v < 40 ? _cMuted : null);
+      case 'borrow_fee':
+        return v > _kShortMaxBorrowFee ? _kRed : null;
+      case 'borrow_x':
+        return v < _kShortMinBorrowX ? _kRed : null;
       case 'mkt_mult':
         return v >= 1 ? _kGreen : (v < 0.7 ? _kRed : _kAmber);
       case 'adx':
@@ -1573,7 +1601,8 @@ class _HomeState extends State<_Home> {
         'p_amount',
         'p_risk',
         'p_risk_pct',
-        'p_target_cap'
+        'p_target_cap',
+        'borrow_x'
       ]) {
         r[k] = null;
       }
@@ -1621,6 +1650,8 @@ class _HomeState extends State<_Home> {
       r['p_amount'] = shares * entry;
       r['p_risk'] = shares * dist;
       r['p_risk_pct'] = risk > 0 ? shares * dist / risk * 100 : null;
+      final av = _d(r['borrow_avail']);
+      r['borrow_x'] = (av != null && shares > 0) ? av / shares : null;
     }
     for (final r in _rows) {
       final why = _swingFail(r, long);
@@ -1633,6 +1664,22 @@ class _HomeState extends State<_Home> {
   String? _swingFail(Map<String, dynamic> r, bool long) {
     double? g(String k) => _d(r[k]);
     if (r['pinned'] == true) return 'precio fijado (posible OPA)';
+    final fx = (r['currency'] == 'EUR' && _fx != null && _fx! > 0) ? _fx! : 1.0;
+    if (!long) {
+      final px = g('price');
+      if (px == null || px * fx < _kShortMinPrice) {
+        return 'precio ${px == null ? '–' : '${_num(px * fx, 2)} \$'} (< ${_kShortMinPrice.toInt()} \$)';
+      }
+    }
+    // Capitalización mínima solo para EE. UU.: 2.000 M$ en largos, 5.000 M$ en cortos.
+    if (r['currency'] != 'EUR') {
+      final minMc = long ? _kLongMinMcapB : _kShortMinMcapB;
+      final mc = g('mcap_b');
+      if (mc == null || mc < minMc) {
+        return 'capitalización ${mc == null ? '–' : '${_num(mc * 1000, 0)} M\$'} '
+            '(< ${_num(minMc * 1000, 0)} M\$)';
+      }
+    }
     final e20 = g('d_ema20'), e50 = g('d_ema50'), e5200 = g('d_e50_200');
     if (e20 == null || e50 == null || e5200 == null) return 'sin datos de EMAs';
     if (long) {
@@ -1646,16 +1693,39 @@ class _HomeState extends State<_Home> {
     }
     final de = g('days_to_earn');
     if (de == null) return 'sin fecha de resultados';
-    if (de <= 21) return 'resultados en ${de.toInt()} días';
+    // Largos: más de 21 días naturales. Cortos (se sale antes): más de 14.
+    final minDays = long ? _kEarnDaysLong : _kEarnDaysShort;
+    if (de <= minDays) return 'resultados en ${de.toInt()} días (≤ $minDays)';
+    if (!long) {
+      final xd = g('days_to_exdiv');
+      if (xd != null && xd <= _kShortExDivDays) {
+        return 'ex-dividendo en ${xd.toInt()} días (≤ $_kShortExDivDays)';
+      }
+    }
     final sa = g('p_stop_atr');
     if (sa == null) return 'sin plan de entrada';
     if (sa < 1) return 'stop a ${_num(sa, 1)} ATR (< 1)';
     final rr = g('p_rr');
     if (rr == null || rr < 1.5)
       return 'B/R ${rr == null ? '–' : _num(rr, 2)} (< 1,5)';
+    if (!long) {
+      final av = g('borrow_avail');
+      final fee = g('borrow_fee');
+      if (av == null) return 'sin datos de préstamo (IBKR)';
+      final bx = g('borrow_x');
+      if (bx == null || bx < _kShortMinBorrowX) {
+        return 'préstamo disponible ${bx == null ? '–' : '${_num(bx, 1)}×'} tu posición '
+            '(< ${_kShortMinBorrowX.toInt()}×)';
+      }
+      if (fee == null || fee > _kShortMaxBorrowFee) {
+        return 'tasa de préstamo ${fee == null ? '–' : _num(fee, 2)} % (> ${_num(_kShortMaxBorrowFee, 0)} %)';
+      }
+    }
     final dv = g('dvol_m');
-    if (dv == null || dv < 50)
-      return 'volumen ${dv == null ? '–' : _num(dv, 0)} M (< 50)';
+    final minDv = long ? _kLongMinDvolM : _kShortMinDvolM;
+    if (dv == null || dv * fx < minDv) {
+      return 'volumen ${dv == null ? '–' : _num(dv * fx, 0)} M\$ (< ${minDv.toInt()})';
+    }
     final ru = g('p_risk_pct');
     if (ru == null || ru < 60)
       return 'riesgo usado ${ru == null ? '–' : _num(ru, 0)} % (< 60)';
@@ -1953,6 +2023,10 @@ class _HomeState extends State<_Home> {
         if (dx != null) extra.add('ex-dividendo en $dx días');
         final sf = _d(r['short_float']);
         if (sf != null) extra.add('short ${_num(sf, 1)} % del float');
+        final bf = _d(r['borrow_fee']);
+        if (bf != null) extra.add('préstamo ${_num(bf, 2)} % anual');
+        final bx = _d(r['borrow_x']);
+        if (bx != null) extra.add('disponible ${_num(bx, 1)}× la posición');
         final sp = _d(r['short_pub']);
         if (sp != null) extra.add('cortos CNMV ${_num(sp, 2)} %');
         if (extra.isNotEmpty) b.writeln(extra.join(' · '));
@@ -4422,6 +4496,21 @@ class _DetailState extends State<_Detail> {
       if (dx != null) chips.add(_chip('Ex-dividendo en', '$dx días'));
       final sf = _d(r['short_float']);
       if (sf != null) chips.add(_chip('Short % float', '${_num(sf, 1)} %'));
+      final bf = _d(r['borrow_fee']);
+      final bav = _d(r['borrow_avail']);
+      if (bf != null || bav != null) {
+        chips.add(_chip(
+            'Préstamo IBKR',
+            '${bf == null ? '–' : '${_num(bf, 2)} % anual'} · '
+                '${bav == null ? '–' : (bav >= 10000000 ? '>10 M acc.' : '${_num(bav, 0)} acc.')}'
+                '${shares > 0 && bav != null ? ' (${_num(bav / shares, 1)}× tu posición)' : ''}',
+            color: (bf != null && bf > _kShortMaxBorrowFee) ||
+                    (bav != null &&
+                        shares > 0 &&
+                        bav / shares < _kShortMinBorrowX)
+                ? _kRed
+                : null));
+      }
       final sp = _d(r['short_pub']);
       if (sp != null) {
         chips.add(_chip(
