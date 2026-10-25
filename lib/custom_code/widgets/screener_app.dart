@@ -277,6 +277,8 @@ List<_Field> _buildFields() {
       s: true, h: '% vs máx. 52 sem.');
   n('d_low52', '% sobre mínimo 52 semanas', _cTec,
       s: true, h: '% vs mín. 52 sem.');
+  n('high52', 'Máximo 52 semanas', _cTec, w: 96, h: 'Máx. 52 sem.');
+  n('low52', 'Mínimo 52 semanas', _cTec, w: 96, h: 'Mín. 52 sem.');
   n('clean3m', 'Limpieza tendencia 3m (R² ±)', _cTec,
       s: true, h: 'Limpieza 3m');
   n('clean6m', 'Limpieza tendencia 6m (R² ±)', _cTec,
@@ -713,6 +715,14 @@ List<_Preset> _builtInPresets() => [
 double? _d(dynamic v) => v is num ? v.toDouble() : null;
 
 String _cur(Map<String, dynamic> r) => r['currency'] == 'EUR' ? '€' : '\$';
+
+const Set<String> _kMoneyKeys = {
+  'price',
+  'high52',
+  'low52',
+  'hb_stop',
+  'hs_stop'
+};
 
 dynamic _minN(List<dynamic> l) {
   num? m;
@@ -2573,9 +2583,8 @@ class _GridCol {
         width: width ?? f.width,
         right: f.kind == _Kind.number,
         bold: f.key == 'ticker' || f.key == 'hb_rr' || f.key == 'hs_rr',
-        text: f.key == 'price'
-            ? (r) =>
-                r['price'] == null ? '–' : '${_fmt(f, r['price'])} ${_cur(r)}'
+        text: _kMoneyKeys.contains(f.key)
+            ? (r) => r[f.key] == null ? '–' : '${_fmt(f, r[f.key])} ${_cur(r)}'
             : (r) => _fmt(f, r[f.key]),
         color: (r) => _colorFor(f, r[f.key]),
         leading: f.key == 'ticker'
@@ -3623,6 +3632,40 @@ class _DetailState extends State<_Detail> {
     );
   }
 
+  Widget _rangeLine(Map<String, dynamic> r) {
+    final cs = _cur(r);
+    final px = _d(r['price']);
+    final hi = _d(r['high52']);
+    final lo = _d(r['low52']);
+    final dh = _d(r['d_high52']);
+    final dl = _d(r['d_low52']);
+    String pc(double? d) =>
+        d == null ? '' : ' (${d > 0 ? '+' : ''}${_num(d, 1)} %)';
+    const k = TextStyle(fontSize: 13.5, color: _cMuted);
+    const v =
+        TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: _cText);
+    return Text.rich(
+      TextSpan(children: [
+        const TextSpan(text: 'Precio ', style: k),
+        TextSpan(text: px == null ? '–' : '${_num(px, 2)} $cs', style: v),
+        const TextSpan(text: '   ·   Máx. 52 sem. ', style: k),
+        TextSpan(text: hi == null ? '–' : '${_num(hi, 2)} $cs', style: v),
+        TextSpan(
+            text: pc(dh),
+            style: TextStyle(
+                fontSize: 13.5, color: (dh ?? 0) < 0 ? _kRed : _kGreen)),
+        const TextSpan(text: '   ·   Mín. 52 sem. ', style: k),
+        TextSpan(text: lo == null ? '–' : '${_num(lo, 2)} $cs', style: v),
+        TextSpan(
+            text: pc(dl),
+            style: TextStyle(
+                fontSize: 13.5, color: (dl ?? 0) > 0 ? _kGreen : _kRed)),
+      ]),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
   Widget _header() {
     final r = widget.row;
     final ticker = (r['ticker'] ?? '').toString();
@@ -3672,6 +3715,8 @@ class _DetailState extends State<_Detail> {
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(fontSize: 14, color: _cMuted),
         ),
+        const SizedBox(height: 6),
+        _rangeLine(r),
       ],
     );
     final entry = Container(
@@ -3933,7 +3978,10 @@ class _DetailState extends State<_Detail> {
       for (final f in _kFields.where((f) => f.cat == cat)) {
         final v = r[f.key];
         if (v == null) continue;
-        tiles.add(_kv(f.label, _fmt(f, v), color: _colorFor(f, v)));
+        final txt = _kMoneyKeys.contains(f.key)
+            ? '${_fmt(f, v)} ${_cur(r)}'
+            : _fmt(f, v);
+        tiles.add(_kv(f.label, txt, color: _colorFor(f, v)));
       }
       if (tiles.isEmpty) continue;
       sections.add(Padding(
