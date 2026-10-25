@@ -258,14 +258,22 @@ List<_Field> _buildFields() {
   n('dvol_m', 'Volumen medio diario en millones (moneda local)', _cId,
       dec: 0, h: 'Vol. medio (M)');
 
-  n('score', 'Puntuación (0-100)', _cPlan, dec: 0, w: 82, h: 'Puntuación');
+  n('score', 'Puntuación (0-100, solo si pasa los filtros duros)', _cPlan,
+      dec: 0, w: 82, h: 'Puntuación');
+  t('discard', 'Motivo de descarte (filtros duros)', _cPlan, w: 180);
+  b('swing_ok', 'Pasa los filtros duros del swing', _cPlan,
+      w: 80, h: 'Pasa filtros');
+  n('mkt_mult', 'Multiplicador de mercado', _cPlan, w: 76, h: 'Mult. mercado');
   n('p_entry', 'Entrada (sobre máx./bajo mín. de la última sesión)', _cPlan,
       w: 96, h: 'Entrada');
   n('p_stop', 'Stop', _cPlan, w: 96);
   n('p_stop_pct', 'Distancia al stop %', _cPlan, w: 76, h: 'Stop %');
   n('p_stop_atr', 'Distancia al stop en ATR', _cPlan, w: 76, h: 'Stop en ATR');
-  n('p_target', 'Objetivo (siguiente máximo/mínimo relevante)', _cPlan,
+  n('p_target', 'Objetivo (siguiente máximo/mínimo relevante, máx. 2,5 ATR)',
+      _cPlan,
       w: 96, h: 'Objetivo');
+  b('p_target_cap', 'Objetivo limitado a 2,5 ATR', _cPlan,
+      w: 80, h: 'Obj. limitado');
   n('p_target_pct', 'Recorrido hasta el objetivo %', _cPlan,
       w: 84, h: 'Recorrido %');
   n('p_rr', 'Beneficio/riesgo real (hasta el objetivo)', _cPlan,
@@ -301,6 +309,9 @@ List<_Field> _buildFields() {
   n('day_high', 'Máximo de la última sesión', _cTec, w: 96, h: 'Máx. sesión');
   n('day_low', 'Mínimo de la última sesión', _cTec, w: 96, h: 'Mín. sesión');
   n('beta', 'Beta', _cTec, w: 60);
+  n('range20', 'Rango de los últimos 20 cierres %', _cTec,
+      h: 'Rango 20 sesiones %');
+  b('pinned', 'Precio fijado (posible OPA)', _cTec, w: 90, h: 'Precio fijado');
   n('rsi_w', 'RSI semanal', _cTec, dec: 0, w: 66);
   n('atr_pct', 'ATR % (volatilidad diaria)', _cTec, h: 'ATR %');
   n('vol_rel', 'Volumen relativo (vs media 20)', _cTec, h: 'Volumen relativo');
@@ -455,6 +466,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'name',
     'market',
     'score',
+    'discard',
     'price',
     'p_entry',
     'p_stop_pct',
@@ -476,6 +488,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'name',
     'market',
     'score',
+    'discard',
     'price',
     'p_entry',
     'p_stop_pct',
@@ -522,9 +535,13 @@ const Map<String, String> _kHelp = {
   'eps_beats_4q': '4 = ha batido los cuatro últimos trimestres.',
   'p_stop_atr':
       'Distancia del stop en ATRs. Menos de 1 = el stop puede saltar por ruido; 1,5 o más es holgado.',
-  'p_rr':
-      'Recorrido hasta el siguiente máximo relevante (mínimo en cortos) dividido por la distancia al stop. '
-          'Sin objetivo (valor en máximos) queda vacío.',
+  'p_rr': 'Recorrido hasta el objetivo dividido por la distancia al stop. El objetivo es el siguiente '
+      'máximo relevante (mínimo en cortos), como mucho a 2,5 ATR de la entrada.',
+  'swing_ok':
+      'Precio y EMAs en orden, resultados a más de 21 días, stop ≥ 1 ATR, B/R ≥ 1,5, '
+          'volumen ≥ 50 M, riesgo usado ≥ 60 % y precio no fijado.',
+  'pinned':
+      'ATR menor del 0,6 % y rango de 20 sesiones menor del 2 %: suele ser una OPA en efectivo.',
   'p_risk_pct':
       'Riesgo real de la posición en % de tu riesgo máximo. Bajo = el tope de posición limita tanto '
           'que la operación apenas arriesga.',
@@ -615,14 +632,7 @@ List<_Preset> _builtInPresets() => [
           'Swing 2 semanas (filtros duros + puntuación)',
           'long',
           [
-            _Filter('d_ema20', min: 0),
-            _Filter('d_ema50', min: 0),
-            _Filter('d_e50_200', min: 0),
-            _Filter('days_to_earn', min: 22),
-            _Filter('p_stop_atr', min: 1),
-            _Filter('p_rr', min: 1.5),
-            _Filter('dvol_m', min: 50),
-            _Filter('p_risk_pct', min: 60),
+            _Filter('swing_ok', boolVal: true),
           ],
           sortKey: 'score',
           sortAsc: false),
@@ -704,14 +714,7 @@ List<_Preset> _builtInPresets() => [
           'Swing 2 semanas (filtros duros + puntuación)',
           'short',
           [
-            _Filter('d_ema20', max: 0),
-            _Filter('d_ema50', max: 0),
-            _Filter('d_e50_200', max: 0),
-            _Filter('days_to_earn', min: 22),
-            _Filter('p_stop_atr', min: 1),
-            _Filter('p_rr', min: 1.5),
-            _Filter('dvol_m', min: 50),
-            _Filter('p_risk_pct', min: 60),
+            _Filter('swing_ok', boolVal: true),
           ],
           sortKey: 'score',
           sortAsc: false),
@@ -799,6 +802,8 @@ List<_Preset> _builtInPresets() => [
 double? _d(dynamic v) => v is num ? v.toDouble() : null;
 
 String _cur(Map<String, dynamic> r) => r['currency'] == 'EUR' ? '€' : '\$';
+
+const double _kTargetAtrCap = 2.5;
 
 const Set<String> _kMoneyKeys = {
   'price',
@@ -912,6 +917,9 @@ Color? _colorFor(_Field f, dynamic v) {
     if (v == 'todas bajan') return _kRed;
   }
   if (f.key == 'brk_long' && v == true) return _kGreen;
+  if (f.key == 'pinned' && v == true) return _kRed;
+  if (f.key == 'swing_ok') return v == true ? _kGreen : _kRed;
+  if (f.key == 'discard') return _kRed;
   if (f.key == 'brk_short' && v == true) return _kRed;
   if (_kSessionKeys.contains(f.key) && v is num) {
     return f.key.startsWith('hb') ? _kGreen : _kRed;
@@ -931,6 +939,8 @@ Color? _colorFor(_Field f, dynamic v) {
         return v <= 21 ? _kRed : null;
       case 'score':
         return v >= 70 ? _kGreen : (v < 40 ? _cMuted : null);
+      case 'mkt_mult':
+        return v >= 1 ? _kGreen : (v < 0.7 ? _kRed : _kAmber);
       case 'adx':
         return (v >= 20 && v <= 40) ? _kGreen : null;
     }
@@ -1562,7 +1572,8 @@ class _HomeState extends State<_Home> {
         'p_shares',
         'p_amount',
         'p_risk',
-        'p_risk_pct'
+        'p_risk_pct',
+        'p_target_cap'
       ]) {
         r[k] = null;
       }
@@ -1578,7 +1589,18 @@ class _HomeState extends State<_Home> {
           : (pat != null ? math.max(hi, pat) : hi);
       final dist = (entry - stop).abs();
       if (dist <= 0 || entry <= 0) continue;
-      final tgt = long ? _d(r['tgt_l']) : _d(r['tgt_s']);
+      final atrAbs = (atrp != null && atrp > 0) ? atrp * px / 100 : null;
+      var tgt = long ? _d(r['tgt_l']) : _d(r['tgt_s']);
+      var capped = false;
+      if (atrAbs != null) {
+        final cap = long
+            ? entry + _kTargetAtrCap * atrAbs
+            : entry - _kTargetAtrCap * atrAbs;
+        if (tgt == null || (long ? tgt > cap : tgt < cap)) {
+          tgt = cap;
+          capped = true;
+        }
+      }
       final fx =
           (r['currency'] == 'EUR' && _fx != null && _fx! > 0) ? _fx! : 1.0;
       final risk = _risk / fx;
@@ -1587,10 +1609,11 @@ class _HomeState extends State<_Home> {
       r['p_entry'] = entry;
       r['p_stop'] = stop;
       r['p_stop_pct'] = dist / entry * 100;
-      if (atrp != null && atrp > 0) r['p_stop_atr'] = dist / (atrp * px / 100);
+      if (atrAbs != null) r['p_stop_atr'] = dist / atrAbs;
       if (tgt != null) {
         final run = (tgt - entry).abs();
         r['p_target'] = tgt;
+        r['p_target_cap'] = capped;
         r['p_target_pct'] = run / entry * 100;
         r['p_rr'] = run / dist;
       }
@@ -1599,14 +1622,60 @@ class _HomeState extends State<_Home> {
       r['p_risk'] = shares * dist;
       r['p_risk_pct'] = risk > 0 ? shares * dist / risk * 100 : null;
     }
+    for (final r in _rows) {
+      final why = _swingFail(r, long);
+      r['discard'] = why;
+      r['swing_ok'] = why == null;
+    }
+  }
+
+  /// Filtros duros del swing de 2 semanas. Devuelve el primer motivo de descarte o null.
+  String? _swingFail(Map<String, dynamic> r, bool long) {
+    double? g(String k) => _d(r[k]);
+    if (r['pinned'] == true) return 'precio fijado (posible OPA)';
+    final e20 = g('d_ema20'), e50 = g('d_ema50'), e5200 = g('d_e50_200');
+    if (e20 == null || e50 == null || e5200 == null) return 'sin datos de EMAs';
+    if (long) {
+      if (e20 <= 0) return 'bajo la EMA20';
+      if (e50 <= 0) return 'bajo la EMA50';
+      if (e5200 <= 0) return 'EMA50 bajo la EMA200';
+    } else {
+      if (e20 >= 0) return 'sobre la EMA20';
+      if (e50 >= 0) return 'sobre la EMA50';
+      if (e5200 >= 0) return 'EMA50 sobre la EMA200';
+    }
+    final de = g('days_to_earn');
+    if (de == null) return 'sin fecha de resultados';
+    if (de <= 21) return 'resultados en ${de.toInt()} días';
+    final sa = g('p_stop_atr');
+    if (sa == null) return 'sin plan de entrada';
+    if (sa < 1) return 'stop a ${_num(sa, 1)} ATR (< 1)';
+    final rr = g('p_rr');
+    if (rr == null || rr < 1.5)
+      return 'B/R ${rr == null ? '–' : _num(rr, 2)} (< 1,5)';
+    final dv = g('dvol_m');
+    if (dv == null || dv < 50)
+      return 'volumen ${dv == null ? '–' : _num(dv, 0)} M (< 50)';
+    final ru = g('p_risk_pct');
+    if (ru == null || ru < 60)
+      return 'riesgo usado ${ru == null ? '–' : _num(ru, 0)} % (< 60)';
+    return null;
   }
 
   /// Puntuación 0-100 sobre los valores que pasan los filtros.
   /// Fuerza relativa 30 (15 percentil 3m vs sector + 15 percentil 1m vs índice),
   /// entrada 25 (extensión sobre EMA20 en ATR), B/R 20, volumen 10, ADX 10,
   /// colchón hasta máx./mín. 52 sem. 5. Multiplicador por régimen de mercado.
-  void _score(List<Map<String, dynamic>> rows) {
+  void _score(List<Map<String, dynamic>> all) {
     final long = _mode == 'long';
+    for (final r in all) {
+      r['score'] = null;
+      final st = _regimeOf(r);
+      r['mkt_mult'] = long
+          ? (st == 'verde' ? 1.0 : (st == 'ambar' ? 0.7 : 0.5))
+          : (st == 'verde' ? 0.7 : 1.0);
+    }
+    final rows = all.where((r) => r['swing_ok'] == true).toList();
     final sign = long ? 1.0 : -1.0;
     Map<Map<String, dynamic>, double> pctRank(
         double? Function(Map<String, dynamic>) get) {
@@ -1646,11 +1715,7 @@ class _HomeState extends State<_Home> {
       if (ax != null) sc += (ax >= 20 && ax <= 40) ? 10 : 4;
       final room = long ? _d(r['d_high52']) : _d(r['d_low52']);
       if (room != null && (long ? room <= -5 : room >= 5)) sc += 5;
-      final st = _regimeOf(r);
-      final mult = long
-          ? (st == 'verde' ? 1.0 : (st == 'ambar' ? 0.7 : 0.5))
-          : (st == 'verde' ? 0.7 : 1.0);
-      r['score'] = (sc * mult).round();
+      r['score'] = (sc * (_d(r['mkt_mult']) ?? 1.0)).round();
     }
   }
 
@@ -1845,15 +1910,17 @@ class _HomeState extends State<_Home> {
     for (final r in rows) {
       final cs = _cur(r);
       b.writeln();
+      final why = r['discard'];
       b.writeln('${r['ticker']} · ${r['name']} — ${nv(r['price'])} $cs · '
-          'puntuación ${r['score'] ?? '–'}${r['market'] != null ? ' · ${r['market']}' : ''}');
+          '${why == null ? 'puntuación ${r['score'] ?? '–'} (×${nv(r['mkt_mult'], dec: 1)} mercado)' : 'DESCARTADO: $why'}'
+          '${r['market'] != null ? ' · ${r['market']}' : ''}');
 
       final e = _d(r['p_entry']);
       if (e != null) {
         final tgt = _d(r['p_target']);
         b.writeln('Entrada ${nv(e)} · stop ${nv(r['p_stop'])} '
             '(${nv(r['p_stop_pct'], dec: 1)} % · ${nv(r['p_stop_atr'], dec: 1)} ATR) · '
-            '${tgt != null ? 'objetivo ${nv(tgt)} (${long ? '+' : '−'}${nv(r['p_target_pct'], dec: 1)} %) · '
+            '${tgt != null ? 'objetivo${r['p_target_cap'] == true ? ' (2,5 ATR)' : ''} ${nv(tgt)} (${long ? '+' : '−'}${nv(r['p_target_pct'], dec: 1)} %) · '
                 'B/R ${nv(r['p_rr'])}' : 'sin objetivo (${long ? 'en máximos' : 'en mínimos'})'}');
         b.writeln(
             'Tamaño ${r['p_shares'] ?? '–'} acc. · ${nv(r['p_amount'], dec: 0)} $cs · '
@@ -4296,11 +4363,12 @@ class _DetailState extends State<_Detail> {
     final capital = shares * px;
     final realRisk = shares * dist;
     final chips = <Widget>[];
-    final tgt = _long ? _d(r['tgt_l']) : _d(r['tgt_s']);
+    final tgt = _d(r['p_target']) ?? (_long ? _d(r['tgt_l']) : _d(r['tgt_s']));
+    final capped = r['p_target_cap'] == true;
     if (tgt != null && (_long ? tgt > px : tgt < px)) {
       final run = (tgt - px).abs();
       final rr = run / dist;
-      chips.add(_chip('Objetivo',
+      chips.add(_chip(capped ? 'Objetivo (2,5 ATR)' : 'Objetivo (resistencia)',
           '${_num(tgt, 2)} $cs (${_long ? '+' : '−'}${_num(run / px * 100, 1)} %)'));
       chips.add(_chip('B/R real', _num(rr, 2),
           color: rr < 1.2 ? _kRed : (rr >= 1.5 ? _kGreen : null)));
@@ -4326,6 +4394,10 @@ class _DetailState extends State<_Detail> {
             color: _kRed));
       }
     }
+    final why = r['discard'];
+    chips.add(why == null
+        ? _chip('Filtros duros', 'pasa', color: _kGreen)
+        : _chip('Descartado', why.toString(), color: _kRed));
     if (widget.regime != 'verde') {
       chips.add(_chip('Mercado', widget.regime == 'rojo' ? 'ROJO' : 'ÁMBAR',
           color: widget.regime == 'rojo' ? _kRed : _kAmber));
