@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "426840025292",
+    "project_id": "bolsascreener",
+    "storage_bucket": "bolsascreener.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:426840025292:android:d1ebec8db5dc1e8ccffa69",
+        "android_client_info": {
+          "package_name": "com.cgr.bolsascreener"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDbuSXz1X0HXNFLW1cxNF5mk1v0-xCcvUo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
