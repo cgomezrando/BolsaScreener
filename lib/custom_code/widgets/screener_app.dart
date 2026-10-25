@@ -39,6 +39,7 @@ const Color _kGreenFill = Color(0xFF1B8A4C);
 const Color _kRed = Color(0xFFE5534B);
 const Color _kRedFill = Color(0xFFB33A34);
 const Color _kStar = Color(0xFFF5C451);
+const Color _kAmber = Color(0xFFE0A93B);
 
 ThemeData _darkTheme() {
   final base = ThemeData(brightness: Brightness.dark, useMaterial3: true);
@@ -158,6 +159,7 @@ class _Field {
 }
 
 const String _cId = 'Empresa';
+const String _cPlan = 'Plan de entrada y puntuación';
 const String _cEma = 'Medias (EMA)';
 const String _cTec = 'Técnico';
 const String _cRet = 'Rentabilidad';
@@ -170,6 +172,7 @@ const String _cCor = 'Cortos y dividendo';
 
 const List<String> _kCatOrder = [
   _cId,
+  _cPlan,
   _cEma,
   _cTec,
   _cRet,
@@ -252,12 +255,34 @@ List<_Field> _buildFields() {
   n('price', 'Precio', _cId, w: 92);
   n('mcap_b', 'Capitalización (miles de M\$)', _cId,
       dec: 1, h: 'Cap. (miles M\$)');
-  n('dvol_m', 'Volumen medio diario (M\$)', _cId,
-      dec: 0, h: 'Vol. medio (M\$)');
+  n('dvol_m', 'Volumen medio diario en millones (moneda local)', _cId,
+      dec: 0, h: 'Vol. medio (M)');
+
+  n('score', 'Puntuación (0-100)', _cPlan, dec: 0, w: 82, h: 'Puntuación');
+  n('p_entry', 'Entrada (sobre máx./bajo mín. de la última sesión)', _cPlan,
+      w: 96, h: 'Entrada');
+  n('p_stop', 'Stop', _cPlan, w: 96);
+  n('p_stop_pct', 'Distancia al stop %', _cPlan, w: 76, h: 'Stop %');
+  n('p_stop_atr', 'Distancia al stop en ATR', _cPlan, w: 76, h: 'Stop en ATR');
+  n('p_target', 'Objetivo (siguiente máximo/mínimo relevante)', _cPlan,
+      w: 96, h: 'Objetivo');
+  n('p_target_pct', 'Recorrido hasta el objetivo %', _cPlan,
+      w: 84, h: 'Recorrido %');
+  n('p_rr', 'Beneficio/riesgo real (hasta el objetivo)', _cPlan,
+      w: 76, h: 'B/R real');
+  n('p_shares', 'Acciones (con tu riesgo y tope)', _cPlan,
+      dec: 0, w: 76, h: 'Acciones');
+  n('p_amount', 'Importe de la posición', _cPlan, dec: 0, w: 96, h: 'Importe');
+  n('p_risk', 'Riesgo real de la posición', _cPlan,
+      dec: 0, w: 86, h: 'Riesgo real');
+  n('p_risk_pct', 'Riesgo real en % de tu riesgo máximo', _cPlan,
+      dec: 0, w: 80, h: 'Riesgo usado %');
 
   for (final p in [20, 50, 100, 200]) {
     n('d_ema$p', '% sobre EMA$p', _cEma, s: true, w: 72);
   }
+  n('d_e50_200', 'EMA50 sobre EMA200 %', _cEma,
+      s: true, h: 'EMA50 vs EMA200 %');
   for (final p in [20, 50, 100, 200]) {
     n('a_ema$p', 'ATRs sobre EMA$p', _cEma, s: true);
   }
@@ -269,6 +294,13 @@ List<_Field> _buildFields() {
   ch('trend', 'Tendencia (orden de EMAs)', _cEma, w: 84, h: 'Tendencia');
 
   n('rsi_d', 'RSI diario', _cTec, dec: 0, w: 60);
+  n('adx', 'ADX (fuerza de la tendencia)', _cTec, dec: 0, w: 60, h: 'ADX');
+  n('ema20_run', 'Cierres seguidos sobre (+) o bajo (−) la EMA20', _cTec,
+      dec: 0, s: true, w: 76, h: 'Racha EMA20');
+  n('chg_1d', 'Variación de la última sesión %', _cTec, s: true, h: 'Día %');
+  n('day_high', 'Máximo de la última sesión', _cTec, w: 96, h: 'Máx. sesión');
+  n('day_low', 'Mínimo de la última sesión', _cTec, w: 96, h: 'Mín. sesión');
+  n('beta', 'Beta', _cTec, w: 60);
   n('rsi_w', 'RSI semanal', _cTec, dec: 0, w: 66);
   n('atr_pct', 'ATR % (volatilidad diaria)', _cTec, h: 'ATR %');
   n('vol_rel', 'Volumen relativo (vs media 20)', _cTec, h: 'Volumen relativo');
@@ -373,6 +405,8 @@ List<_Field> _buildFields() {
       s: true, dec: 1, h: 'Reacción resultados %');
   d('next_earn', 'Próximos resultados', _cRes);
   n('days_to_earn', 'Días hasta resultados', _cRes, dec: 0, w: 84);
+  n('earn_bd', 'Días hábiles hasta resultados', _cRes,
+      dec: 0, w: 84, h: 'Días hábiles a resultados');
   b('earn_est', 'Fecha de resultados estimada', _cRes, h: 'Fecha estimada');
   n('rev7', 'Revisión EPS año, 7 días %', _cRes,
       s: true, dec: 1, h: 'Rev. EPS 7d %');
@@ -420,38 +454,43 @@ const Map<String, List<String>> _kDefaultCols = {
     'ticker',
     'name',
     'market',
+    'score',
     'price',
-    'trend',
-    'd_ema20',
-    'd_ema50',
-    'd_ema200',
-    'rsi_d',
-    'r_1m',
-    'r_3m',
-    'rs_ind_3m',
-    'hb_2050',
-    'hb_rr',
-    'pe',
-    'pe_vs_ind',
-    'days_to_earn'
+    'p_entry',
+    'p_stop_pct',
+    'p_stop_atr',
+    'p_target_pct',
+    'p_rr',
+    'p_shares',
+    'p_risk',
+    'a_ema20',
+    'rs_sec_3m',
+    'rs_idx_1m',
+    'vol_rel',
+    'dvol_m',
+    'adx',
+    'earn_bd'
   ],
   'short': [
     'ticker',
     'name',
     'market',
+    'score',
     'price',
-    'trend',
-    'd_ema20',
-    'd_ema50',
-    'd_ema200',
-    'rsi_d',
-    'r_1m',
-    'r_3m',
-    'rs_ind_3m',
-    'hs_any',
-    'hs_rr',
-    'pe_vs_ind',
-    'days_to_earn',
+    'p_entry',
+    'p_stop_pct',
+    'p_stop_atr',
+    'p_target_pct',
+    'p_rr',
+    'p_shares',
+    'p_risk',
+    'a_ema20',
+    'rs_sec_3m',
+    'rs_idx_1m',
+    'vol_rel',
+    'dvol_m',
+    'adx',
+    'earn_bd',
     'div_yield',
     'days_to_exdiv',
     'short_float',
@@ -481,6 +520,21 @@ const Map<String, String> _kHelp = {
   'vol_rel': '1 = volumen normal. 1,5 = un 50 % más de lo habitual.',
   'rec_mean': '1 = compra fuerte, 3 = mantener, 5 = venta.',
   'eps_beats_4q': '4 = ha batido los cuatro últimos trimestres.',
+  'p_stop_atr':
+      'Distancia del stop en ATRs. Menos de 1 = el stop puede saltar por ruido; 1,5 o más es holgado.',
+  'p_rr':
+      'Recorrido hasta el siguiente máximo relevante (mínimo en cortos) dividido por la distancia al stop. '
+          'Sin objetivo (valor en máximos) queda vacío.',
+  'p_risk_pct':
+      'Riesgo real de la posición en % de tu riesgo máximo. Bajo = el tope de posición limita tanto '
+          'que la operación apenas arriesga.',
+  'adx':
+      'Menos de 20 = sin tendencia clara; 20-40 = tendencia sana; más de 40 = muy extendida.',
+  'ema20_run':
+      '+8 = lleva 8 cierres seguidos sobre la EMA20; −3 = lleva 3 bajo ella.',
+  'earn_bd':
+      'Días hábiles hasta los próximos resultados. Para operaciones de 2 semanas, mínimo 15.',
+  'd_e50_200': 'Positivo = EMA50 por encima de la EMA200.',
   'short_pub':
       'Suma de las posiciones cortas netas que la CNMV publica (las de 0,5 % o más '
           'del capital). 0 = ningún fondo supera ese umbral. Solo valores españoles.',
@@ -558,6 +612,21 @@ class _Preset {
 
 List<_Preset> _builtInPresets() => [
       _Preset(
+          'Swing 2 semanas (filtros duros + puntuación)',
+          'long',
+          [
+            _Filter('d_ema20', min: 0),
+            _Filter('d_ema50', min: 0),
+            _Filter('d_e50_200', min: 0),
+            _Filter('days_to_earn', min: 22),
+            _Filter('p_stop_atr', min: 1),
+            _Filter('p_rr', min: 1.5),
+            _Filter('dvol_m', min: 50),
+            _Filter('p_risk_pct', min: 60),
+          ],
+          sortKey: 'score',
+          sortAsc: false),
+      _Preset(
           'Pullback alcista con martillo en EMA20/50',
           'long',
           [
@@ -631,6 +700,21 @@ List<_Preset> _builtInPresets() => [
           ],
           sortKey: 'days_to_earn',
           sortAsc: true),
+      _Preset(
+          'Swing 2 semanas (filtros duros + puntuación)',
+          'short',
+          [
+            _Filter('d_ema20', max: 0),
+            _Filter('d_ema50', max: 0),
+            _Filter('d_e50_200', max: 0),
+            _Filter('days_to_earn', min: 22),
+            _Filter('p_stop_atr', min: 1),
+            _Filter('p_rr', min: 1.5),
+            _Filter('dvol_m', min: 50),
+            _Filter('p_risk_pct', min: 60),
+          ],
+          sortKey: 'score',
+          sortAsc: false),
       _Preset(
           'Rebote bajista con martillo bajista en EMA',
           'short',
@@ -721,7 +805,14 @@ const Set<String> _kMoneyKeys = {
   'high52',
   'low52',
   'hb_stop',
-  'hs_stop'
+  'hs_stop',
+  'day_high',
+  'day_low',
+  'p_entry',
+  'p_stop',
+  'p_target',
+  'p_amount',
+  'p_risk'
 };
 
 dynamic _minN(List<dynamic> l) {
@@ -827,6 +918,22 @@ Color? _colorFor(_Field f, dynamic v) {
   }
   if (_kCrossKeys.contains(f.key) && v is num) {
     return (f.key.startsWith('xu') || f.key == 'gc') ? _kGreen : _kRed;
+  }
+  if (v is num) {
+    switch (f.key) {
+      case 'p_stop_atr':
+        return v < 1 ? _kRed : (v >= 1.5 ? _kGreen : null);
+      case 'p_rr':
+        return v < 1.2 ? _kRed : (v >= 1.5 ? _kGreen : null);
+      case 'earn_bd':
+        return v <= 15 ? _kRed : null;
+      case 'days_to_earn':
+        return v <= 21 ? _kRed : null;
+      case 'score':
+        return v >= 70 ? _kGreen : (v < 40 ? _cMuted : null);
+      case 'adx':
+        return (v >= 20 && v <= 40) ? _kGreen : null;
+    }
   }
   if (f.key == 'hb_rr' && v is num) return _kGreen;
   if (f.key == 'hs_rr' && v is num) return _kRed;
@@ -1092,6 +1199,8 @@ class _HomeState extends State<_Home> {
   Map<String, dynamic> _bench = {};
   Map<String, dynamic> _sectorsEu = {};
   double? _fx;
+  Map<String, dynamic> _regime = {};
+  bool _showRed = false;
   String _asof = '';
 
   String _mode = 'long';
@@ -1286,6 +1395,7 @@ class _HomeState extends State<_Home> {
 
   Future<void> _refreshAll() async {
     await _pullSettings();
+    _computePlans();
     _riskCtl.text = _plain(_risk);
     _maxCtl.text = _plain(_maxPos);
     await _load();
@@ -1414,6 +1524,8 @@ class _HomeState extends State<_Home> {
         _bench = Map<String, dynamic>.from((j['benchmarks'] as Map?) ?? {});
         _sectorsEu = Map<String, dynamic>.from((j['sectors_eu'] as Map?) ?? {});
         _fx = _d(((j['fx'] as Map?) ?? {})['EURUSD']);
+        _regime = Map<String, dynamic>.from((j['regime'] as Map?) ?? {});
+        _computePlans();
         _asof = (j['asof'] ?? '').toString();
         _loading = false;
       });
@@ -1423,6 +1535,122 @@ class _HomeState extends State<_Home> {
         _error = e.toString();
         _loading = false;
       });
+    }
+  }
+
+  // ---------------------------------------------------- plan de entrada y puntuación
+
+  String _regimeOf(Map<String, dynamic> r) {
+    final key = r['region'] == 'EU' || r['currency'] == 'EUR' ? 'eu' : 'us';
+    return ((_regime[key] as Map?)?['status'] ?? 'ambar').toString();
+  }
+
+  /// Calcula entrada, stop, objetivo, B/R y tamaño para el modo actual.
+  /// Largos: entrada sobre el máximo de la última sesión, stop en su mínimo
+  /// (o el del martillo si es más bajo). Cortos: al revés.
+  void _computePlans() {
+    final long = _mode == 'long';
+    for (final r in _rows) {
+      for (final k in const [
+        'p_entry',
+        'p_stop',
+        'p_stop_pct',
+        'p_stop_atr',
+        'p_target',
+        'p_target_pct',
+        'p_rr',
+        'p_shares',
+        'p_amount',
+        'p_risk',
+        'p_risk_pct'
+      ]) {
+        r[k] = null;
+      }
+      final hi = _d(r['day_high']);
+      final lo = _d(r['day_low']);
+      final px = _d(r['price']);
+      final atrp = _d(r['atr_pct']);
+      if (hi == null || lo == null || px == null) continue;
+      final entry = long ? hi : lo;
+      final pat = long ? _d(r['hb_stop']) : _d(r['hs_stop']);
+      final stop = long
+          ? (pat != null ? math.min(lo, pat) : lo)
+          : (pat != null ? math.max(hi, pat) : hi);
+      final dist = (entry - stop).abs();
+      if (dist <= 0 || entry <= 0) continue;
+      final tgt = long ? _d(r['tgt_l']) : _d(r['tgt_s']);
+      final fx =
+          (r['currency'] == 'EUR' && _fx != null && _fx! > 0) ? _fx! : 1.0;
+      final risk = _risk / fx;
+      final maxPos = _maxPos / fx;
+      final shares = (math.min(risk / dist, maxPos / entry) / 5).floor() * 5;
+      r['p_entry'] = entry;
+      r['p_stop'] = stop;
+      r['p_stop_pct'] = dist / entry * 100;
+      if (atrp != null && atrp > 0) r['p_stop_atr'] = dist / (atrp * px / 100);
+      if (tgt != null) {
+        final run = (tgt - entry).abs();
+        r['p_target'] = tgt;
+        r['p_target_pct'] = run / entry * 100;
+        r['p_rr'] = run / dist;
+      }
+      r['p_shares'] = shares;
+      r['p_amount'] = shares * entry;
+      r['p_risk'] = shares * dist;
+      r['p_risk_pct'] = risk > 0 ? shares * dist / risk * 100 : null;
+    }
+  }
+
+  /// Puntuación 0-100 sobre los valores que pasan los filtros.
+  /// Fuerza relativa 30 (15 percentil 3m vs sector + 15 percentil 1m vs índice),
+  /// entrada 25 (extensión sobre EMA20 en ATR), B/R 20, volumen 10, ADX 10,
+  /// colchón hasta máx./mín. 52 sem. 5. Multiplicador por régimen de mercado.
+  void _score(List<Map<String, dynamic>> rows) {
+    final long = _mode == 'long';
+    final sign = long ? 1.0 : -1.0;
+    Map<Map<String, dynamic>, double> pctRank(
+        double? Function(Map<String, dynamic>) get) {
+      final vals = <Map<String, dynamic>, double>{};
+      for (final r in rows) {
+        final v = get(r);
+        if (v != null) vals[r] = v * sign;
+      }
+      final sorted = vals.entries.toList()
+        ..sort((a, b) => a.value.compareTo(b.value));
+      final out = <Map<String, dynamic>, double>{};
+      final n = sorted.length;
+      for (var i = 0; i < n; i++) {
+        out[sorted[i].key] = n == 1 ? 1.0 : i / (n - 1);
+      }
+      return out;
+    }
+
+    final rs3 = pctRank((r) => _d(r['rs_sec_3m']) ?? _d(r['rs_ind_3m']));
+    final rs1 = pctRank((r) => _d(r['rs_idx_1m']) ?? _d(r['rs_spy_1m']));
+    for (final r in rows) {
+      var sc = 15 * (rs3[r] ?? 0) + 15 * (rs1[r] ?? 0);
+      final ext = _d(r['a_ema20']);
+      if (ext != null) {
+        final e = ext * sign;
+        sc += e < 0 ? 15 : (e <= 1 ? 25 : (e <= 2 ? 15 : 0));
+      }
+      final rr = _d(r['p_rr']);
+      if (rr != null) sc += 20 * ((rr - 1.5) / 1.5).clamp(0.0, 1.0);
+      final vr = _d(r['vol_rel']);
+      final chg = _d(r['chg_1d']) ?? 0;
+      if (vr != null) {
+        final withMove = long ? chg > 0 : chg < 0;
+        sc += (vr >= 1.2 && withMove) ? 10 : (vr >= 1 ? 5 : 0);
+      }
+      final ax = _d(r['adx']);
+      if (ax != null) sc += (ax >= 20 && ax <= 40) ? 10 : 4;
+      final room = long ? _d(r['d_high52']) : _d(r['d_low52']);
+      if (room != null && (long ? room <= -5 : room >= 5)) sc += 5;
+      final st = _regimeOf(r);
+      final mult = long
+          ? (st == 'verde' ? 1.0 : (st == 'ambar' ? 0.7 : 0.5))
+          : (st == 'verde' ? 0.7 : 1.0);
+      r['score'] = (sc * mult).round();
     }
   }
 
@@ -1443,11 +1671,13 @@ class _HomeState extends State<_Home> {
         if (!t.startsWith(q) && !nm.contains(q)) return false;
       }
       if (onlyFav) return favs.contains(r['ticker']?.toString());
+      if (_mode == 'long' && !_showRed && _regimeOf(r) == 'rojo') return false;
       for (final f in fs) {
         if (!_match(r, f)) return false;
       }
       return true;
     }).toList();
+    _score(out);
     final k = _sortKey[_mode]!;
     final asc = _sortAsc[_mode]!;
     out.sort((a, b) => _cmp(a[k], b[k], asc));
@@ -1458,6 +1688,7 @@ class _HomeState extends State<_Home> {
     setState(() {
       _mode = m;
       _detail = null;
+      _computePlans();
     });
     _save();
   }
@@ -1570,46 +1801,95 @@ class _HomeState extends State<_Home> {
   String _favText() {
     final long = _mode == 'long';
     final favs = _favs[_mode]!;
-    final rows = _rows
-        .where((r) => favs.contains(r['ticker']?.toString()))
-        .toList()
-      ..sort(
-          (a, b) => a['ticker'].toString().compareTo(b['ticker'].toString()));
-    String p(dynamic v) {
+    final rows =
+        _rows.where((r) => favs.contains(r['ticker']?.toString())).toList();
+    _score(rows);
+    rows.sort((a, b) => _cmp(a['score'], b['score'], false));
+
+    String sg(dynamic v, {int dec = 1, String suf = ' %'}) {
       final d = _d(v);
       if (d == null) return '–';
-      return '${d > 0 ? '+' : ''}${_num(d, 1)} %';
+      return '${d > 0 ? '+' : ''}${_num(d, dec)}$suf';
     }
 
+    String nv(dynamic v, {int dec = 2}) {
+      final d = _d(v);
+      return d == null ? '–' : _num(d, dec);
+    }
+
+    String st(String k) {
+      final m = _regime[k] as Map?;
+      final s = (m?['status'] ?? '').toString();
+      return s == 'verde'
+          ? 'VERDE'
+          : (s == 'rojo' ? 'ROJO' : (s.isEmpty ? '–' : 'ÁMBAR'));
+    }
+
+    final us = _regime['us'] as Map?;
+    final eu = _regime['eu'] as Map?;
     final b = StringBuffer();
     b.writeln(
         '${long ? 'Favoritos largos' : 'Favoritos cortos'} · cierre del ${_fmtDate(_asof)}');
-    for (final r in rows) {
-      final price = _d(r['price']);
-      final rsi = _d(r['rsi_d']);
-      b.writeln();
+    if (_regime.isNotEmpty) {
       b.writeln(
-          '${r['ticker']} · ${r['name']} — ${price == null ? '–' : _num(price, 2)} ${_cur(r)}');
-      b.writeln('EMA20 ${p(r['d_ema20'])} · EMA50 ${p(r['d_ema50'])} · '
-          'EMA200 ${p(r['d_ema200'])} · RSI ${rsi == null ? '–' : _num(rsi, 0)} · '
-          'tendencia ${r['trend'] ?? '–'}');
-      final extra = <String>[];
-      final stop = long ? _d(r['hb_stop']) : _d(r['hs_stop']);
-      final rr = long ? _d(r['hb_rr']) : _d(r['hs_rr']);
-      if (stop != null) {
-        extra.add(
-            '${long ? 'Stop martillo' : 'Stop martillo bajista'} ${_num(stop, 2)}');
+          'Mercado EE. UU.: ${st('us')} (SPY ${sg(us?['spy_ema20'])} s/EMA20, '
+          '${sg(us?['spy_ema50'])} s/EMA50, VIX ${nv(us?['vix'], dec: 1)}, '
+          '${nv(us?['breadth'], dec: 0)} % del S&P > EMA50)');
+      b.writeln('Mercado Europa: ${st('eu')} (IBEX ${sg(eu?['ibex_ema20'])}, '
+          'DAX ${sg(eu?['dax_ema20'])} s/EMA20, ${nv(eu?['breadth'], dec: 0)} % > EMA50)');
+    }
+    b.writeln(
+        'Riesgo por operación ${_num(_risk, 0)} \$ · posición máx. ${_num(_maxPos, 0)} \$ '
+        '· entrada ${long ? 'sobre el máximo' : 'bajo el mínimo'} de la última sesión');
+
+    for (final r in rows) {
+      final cs = _cur(r);
+      b.writeln();
+      b.writeln('${r['ticker']} · ${r['name']} — ${nv(r['price'])} $cs · '
+          'puntuación ${r['score'] ?? '–'}${r['market'] != null ? ' · ${r['market']}' : ''}');
+
+      final e = _d(r['p_entry']);
+      if (e != null) {
+        final tgt = _d(r['p_target']);
+        b.writeln('Entrada ${nv(e)} · stop ${nv(r['p_stop'])} '
+            '(${nv(r['p_stop_pct'], dec: 1)} % · ${nv(r['p_stop_atr'], dec: 1)} ATR) · '
+            '${tgt != null ? 'objetivo ${nv(tgt)} (${long ? '+' : '−'}${nv(r['p_target_pct'], dec: 1)} %) · '
+                'B/R ${nv(r['p_rr'])}' : 'sin objetivo (${long ? 'en máximos' : 'en mínimos'})'}');
+        b.writeln(
+            'Tamaño ${r['p_shares'] ?? '–'} acc. · ${nv(r['p_amount'], dec: 0)} $cs · '
+            'riesgo real ${nv(r['p_risk'], dec: 0)} $cs (${nv(r['p_risk_pct'], dec: 0)} %)');
       }
-      if (rr != null) extra.add('B/R ${_num(rr, 2)}');
-      final de = r['days_to_earn'];
-      if (de != null) extra.add('resultados en $de días');
+      b.writeln(
+          'ATR ${nv(r['atr_pct'], dec: 1)} % · extensión EMA20 ${sg(r['a_ema20'], suf: ' ATR')} · '
+          'ADX ${nv(r['adx'], dec: 0)} · RSI ${nv(r['rsi_d'], dec: 0)} · '
+          'racha EMA20 ${sg(r['ema20_run'], dec: 0, suf: '')}');
+      b.writeln('FR 3m vs sector ${sg(r['rs_sec_3m'], suf: '')} · '
+          'FR 1m vs índice ${sg(r['rs_idx_1m'], suf: '')} · '
+          'vol. relativo ${nv(r['vol_rel'])} · vol. medio ${nv(r['dvol_m'], dec: 0)} M');
+      b.writeln(
+          'EMA20 ${sg(r['d_ema20'])} · EMA50 ${sg(r['d_ema50'])} · EMA200 ${sg(r['d_ema200'])} · '
+          'EMA50/200 ${sg(r['d_e50_200'])} · tendencia ${r['trend'] ?? '–'} · beta ${nv(r['beta'])}');
+      final bd = r['earn_bd'];
+      final ne = r['next_earn'];
+      if (bd != null || ne != null) {
+        final warn = (bd is num && bd <= 15) ? ' ⚠ dentro de la ventana' : '';
+        b.writeln('Resultados en ${bd ?? '?'} días hábiles'
+            '${ne != null ? ' (${_fmtDate(ne.toString())})' : ''}$warn');
+      } else {
+        b.writeln('Resultados: sin fecha');
+      }
       if (!long) {
+        final extra = <String>[];
         final dy = _d(r['div_yield']);
         if (dy != null && dy > 0) extra.add('dividendo ${_num(dy, 2)} %');
         final dx = r['days_to_exdiv'];
         if (dx != null) extra.add('ex-dividendo en $dx días');
+        final sf = _d(r['short_float']);
+        if (sf != null) extra.add('short ${_num(sf, 1)} % del float');
+        final sp = _d(r['short_pub']);
+        if (sp != null) extra.add('cortos CNMV ${_num(sp, 2)} %');
+        if (extra.isNotEmpty) b.writeln(extra.join(' · '));
       }
-      if (extra.isNotEmpty) b.writeln(extra.join(' · '));
     }
     return b.toString().trimRight();
   }
@@ -1785,6 +2065,7 @@ class _HomeState extends State<_Home> {
                 risk: _risk,
                 maxPos: _maxPos,
                 fx: _fx,
+                regime: _regimeOf(det),
                 accent: _accent,
                 accentFill: _accentFill,
                 onClose: _closeDetail,
@@ -2106,7 +2387,10 @@ class _HomeState extends State<_Home> {
           onChanged: (v) {
             final d = _parse(v);
             if (d != null && d > 0) {
-              _risk = d;
+              setState(() {
+                _risk = d;
+                _computePlans();
+              });
               _save();
             }
           },
@@ -2120,7 +2404,10 @@ class _HomeState extends State<_Home> {
           onChanged: (v) {
             final d = _parse(v);
             if (d != null && d > 0) {
-              _maxPos = d;
+              setState(() {
+                _maxPos = d;
+                _computePlans();
+              });
               _save();
             }
           },
@@ -2213,6 +2500,94 @@ class _HomeState extends State<_Home> {
     );
   }
 
+  Widget _regimeBar() {
+    if (_regime.isEmpty) return const SizedBox.shrink();
+    final us = _regime['us'] as Map?;
+    final eu = _regime['eu'] as Map?;
+    String p(dynamic v) {
+      final d = _d(v);
+      return d == null ? '–' : '${d > 0 ? '+' : ''}${_num(d, 1)} %';
+    }
+
+    String n0(dynamic v) {
+      final d = _d(v);
+      return d == null ? '–' : _num(d, 0);
+    }
+
+    String label(String st) =>
+        st == 'verde' ? 'VERDE' : (st == 'rojo' ? 'ROJO' : 'ÁMBAR');
+
+    Widget chip(String title, Map? m, String detail) {
+      final st = (m?['status'] ?? 'ambar').toString();
+      final col = st == 'verde' ? _kGreen : (st == 'rojo' ? _kRed : _kAmber);
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: col.withAlpha(20),
+          border: Border.all(color: col.withAlpha(150)),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text.rich(TextSpan(children: [
+          TextSpan(
+              text: '$title  ',
+              style: const TextStyle(fontSize: 13, color: _cMuted)),
+          TextSpan(
+              text: label(st),
+              style: TextStyle(
+                  fontSize: 13, fontWeight: FontWeight.w700, color: col)),
+          TextSpan(
+              text: '   $detail',
+              style: const TextStyle(fontSize: 12.5, color: _cText)),
+        ])),
+      );
+    }
+
+    final redUs = us?['status'] == 'rojo';
+    final redEu = eu?['status'] == 'rojo';
+    final children = <Widget>[
+      chip(
+          'EE. UU.',
+          us,
+          'SPY ${p(us?['spy_ema20'])} s/EMA20 · ${p(us?['spy_ema50'])} s/EMA50 · '
+              'VIX ${_d(us?['vix']) == null ? '–' : _num(_d(us?['vix'])!, 1)} · '
+              '${n0(us?['breadth'])} % del S&P > EMA50'),
+      chip(
+          'Europa',
+          eu,
+          'IBEX ${p(eu?['ibex_ema20'])} · DAX ${p(eu?['dax_ema20'])} s/EMA20 · '
+              '${n0(eu?['breadth'])} % > EMA50'),
+    ];
+    if (_mode == 'long' && (redUs || redEu)) {
+      final where = [if (redUs) 'EE. UU.', if (redEu) 'Europa'].join(' y ');
+      children.add(Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: _kRed, size: 20),
+          const SizedBox(width: 6),
+          Text(
+              _showRed
+                  ? 'Mercado en rojo en $where: se muestran igualmente (puntuación ×0,5)'
+                  : 'Mercado en rojo en $where: largos ocultos',
+              style: const TextStyle(color: _kRed, fontSize: 13)),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: _cText),
+            onPressed: () => setState(() => _showRed = !_showRed),
+            child: Text(_showRed ? 'Ocultar' : 'Mostrar igualmente'),
+          ),
+        ],
+      ));
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 12, 12, 0),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: children,
+      ),
+    );
+  }
+
   Widget _results(List<Map<String, dynamic>> vis) {
     final keys = _cols[_mode]!.where(_kFieldMap.containsKey).toList();
     final widths = _colW[_mode]!;
@@ -2228,6 +2603,7 @@ class _HomeState extends State<_Home> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        _regimeBar(),
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 14, 12, 10),
           child: Row(
@@ -2852,6 +3228,7 @@ class _FieldPickerState extends State<_FieldPicker> {
         .where((f) =>
             f.kind != _Kind.text &&
             f.kind != _Kind.date &&
+            f.key != 'score' &&
             (_q.isEmpty ||
                 f.label.toLowerCase().contains(_q) ||
                 f.cat.toLowerCase().contains(_q)))
@@ -3506,6 +3883,7 @@ class _Detail extends StatefulWidget {
     required this.risk,
     required this.maxPos,
     required this.fx,
+    required this.regime,
     required this.accent,
     required this.accentFill,
   });
@@ -3515,6 +3893,7 @@ class _Detail extends StatefulWidget {
   final double risk;
   final double maxPos;
   final double? fx;
+  final String regime;
   final Color accent;
   final Color accentFill;
   final VoidCallback onClose;
@@ -3527,27 +3906,38 @@ class _Detail extends StatefulWidget {
 
 class _DetailState extends State<_Detail> {
   late final TextEditingController _stop;
+  late final TextEditingController _entry;
   late final String _stopSrc;
 
   bool get _long => widget.mode == 'long';
   double get _px => _d(widget.row['price']) ?? 0;
+  double get _atrAbs => (_d(widget.row['atr_pct']) ?? 2) * _px / 100;
 
   @override
   void initState() {
     super.initState();
     final r = widget.row;
-    final atrAbs = (_d(r['atr_pct']) ?? 2) * _px / 100;
-    final pat = _long ? _d(r['hb_stop']) : _d(r['hs_stop']);
+    final pe = _d(r['p_entry']);
+    final ps = _d(r['p_stop']);
+    double e;
     double s;
-    if (pat != null) {
-      s = pat;
+    if (pe != null && ps != null) {
+      e = pe;
+      s = ps;
+      final pat = _long ? _d(r['hb_stop']) : _d(r['hs_stop']);
+      final usesPat = pat != null && (pat - ps).abs() < 1e-9;
       _stopSrc = _long
-          ? 'Stop propuesto: mínimo del martillo alcista'
-          : 'Stop propuesto: máximo del martillo bajista';
+          ? 'Entrada sobre el máx. de la última sesión · stop en '
+              '${usesPat ? 'el mínimo del martillo' : 'su mínimo'}'
+          : 'Entrada bajo el mín. de la última sesión · stop en '
+              '${usesPat ? 'el máximo del martillo' : 'su máximo'}';
     } else {
-      s = _long ? _px - 1.5 * atrAbs : _px + 1.5 * atrAbs;
-      _stopSrc = 'Stop propuesto: 1,5 ATR desde el precio';
+      e = _px;
+      s = _long ? _px - 1.5 * _atrAbs : _px + 1.5 * _atrAbs;
+      _stopSrc = 'Entrada al precio · stop a 1,5 ATR';
     }
+    _entry =
+        TextEditingController(text: e.toStringAsFixed(2).replaceAll('.', ','));
     _stop =
         TextEditingController(text: s.toStringAsFixed(2).replaceAll('.', ','));
   }
@@ -3555,6 +3945,7 @@ class _DetailState extends State<_Detail> {
   @override
   void dispose() {
     _stop.dispose();
+    _entry.dispose();
     super.dispose();
   }
 
@@ -3754,6 +4145,24 @@ class _DetailState extends State<_Detail> {
         ],
       ),
     );
+    Widget field(String label, TextEditingController c) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 15, color: _cMuted)),
+            const SizedBox(width: 10),
+            SizedBox(
+              width: 112,
+              child: TextField(
+                controller: c,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                style: const TextStyle(fontSize: 17),
+                onChanged: (_) => setState(() {}),
+              ),
+            ),
+          ],
+        );
+    final cs = _cur(r);
     final stop = Container(
       padding: const EdgeInsets.fromLTRB(16, 6, 6, 6),
       decoration: BoxDecoration(
@@ -3764,19 +4173,9 @@ class _DetailState extends State<_Detail> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text('Stop (USD)',
-              style: TextStyle(fontSize: 15, color: _cMuted)),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 140,
-            child: TextField(
-              controller: _stop,
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
-              style: const TextStyle(fontSize: 17),
-              onChanged: (_) => setState(() {}),
-            ),
-          ),
+          field('Entrada ($cs)', _entry),
+          const SizedBox(width: 16),
+          field('Stop', _stop),
         ],
       ),
     );
@@ -3849,15 +4248,15 @@ class _DetailState extends State<_Detail> {
 
   Widget _calc() {
     final r = widget.row;
-    final px = _px;
+    final px = _parse(_entry.text) ?? 0;
     final stop = _parse(_stop.text);
     String? err;
     if (stop == null || px <= 0) {
-      err = 'Indica un stop válido.';
+      err = 'Indica una entrada y un stop válidos.';
     } else if ((_long ? px - stop : stop - px) <= 0) {
       err = _long
-          ? 'En largo el stop debe estar por debajo del precio.'
-          : 'En corto el stop debe estar por encima del precio.';
+          ? 'En largo el stop debe estar por debajo de la entrada.'
+          : 'En corto el stop debe estar por encima de la entrada.';
     }
     final chartBtn = SizedBox(
       width: 200,
@@ -3897,16 +4296,49 @@ class _DetailState extends State<_Detail> {
     final capital = shares * px;
     final realRisk = shares * dist;
     final chips = <Widget>[];
-    final rr = _long ? _d(r['hb_rr']) : _d(r['hs_rr']);
-    if (rr != null) {
-      chips.add(_chip('Beneficio/riesgo del patrón', _num(rr, 2),
-          color: widget.accent));
+    final tgt = _long ? _d(r['tgt_l']) : _d(r['tgt_s']);
+    if (tgt != null && (_long ? tgt > px : tgt < px)) {
+      final run = (tgt - px).abs();
+      final rr = run / dist;
+      chips.add(_chip('Objetivo',
+          '${_num(tgt, 2)} $cs (${_long ? '+' : '−'}${_num(run / px * 100, 1)} %)'));
+      chips.add(_chip('B/R real', _num(rr, 2),
+          color: rr < 1.2 ? _kRed : (rr >= 1.5 ? _kGreen : null)));
+    } else {
+      chips.add(_chip('Objetivo',
+          _long ? 'sin resistencia: en máximos' : 'sin soporte: en mínimos'));
+    }
+    final satr = _atrAbs > 0 ? dist / _atrAbs : null;
+    if (satr != null) {
+      chips.add(_chip('Stop a', '${_num(satr, 2)} ATR',
+          color: satr < 1 ? _kRed : (satr >= 1.5 ? _kGreen : null)));
+    }
+    final d20 = _d(r['d_ema20']);
+    if (d20 != null && _px > 0) {
+      final ema20 = _px / (1 + d20 / 100);
+      if (_long && px < ema20) {
+        chips.add(_chip('Atención', 'entrada bajo la EMA20 (${_num(ema20, 2)})',
+            color: _kRed));
+      }
+      if (!_long && px > ema20) {
+        chips.add(_chip(
+            'Atención', 'entrada sobre la EMA20 (${_num(ema20, 2)})',
+            color: _kRed));
+      }
+    }
+    if (widget.regime != 'verde') {
+      chips.add(_chip('Mercado', widget.regime == 'rojo' ? 'ROJO' : 'ÁMBAR',
+          color: widget.regime == 'rojo' ? _kRed : _kAmber));
     }
     if (byCap < byRisk) chips.add(_chip('Limitado por', 'posición máxima'));
+    final bd = r['earn_bd'];
     final de = r['days_to_earn'];
-    if (de != null) {
+    if (bd != null) {
+      chips.add(_chip('Resultados en', '$bd días hábiles',
+          color: (bd is num && bd <= 15) ? _kRed : null));
+    } else if (de != null) {
       chips.add(_chip('Resultados en', '$de días',
-          color: (de is num && de <= 14) ? _kRed : null));
+          color: (de is num && de <= 21) ? _kRed : null));
     }
     if (!_long) {
       final dy = _d(r['div_yield']) ?? 0;
@@ -3936,7 +4368,8 @@ class _DetailState extends State<_Detail> {
       _tile('Acciones', '$shares'),
       _tile('Importe', '${_num(capital, 0)} $cs'),
       _tile('Riesgo real', '${_num(realRisk, 0)} $cs'),
-      _tile('Distancia al stop', '${_num(dist / px * 100, 1)} %'),
+      _tile('Distancia al stop',
+          '${_num(dist / px * 100, 1)} %${_atrAbs > 0 ? ' · ${_num(dist / _atrAbs, 1)} ATR' : ''}'),
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
