@@ -7,9 +7,11 @@ import 'package:flutter/material.dart' hide RepeatMode;
 // Begin custom widget code
 // DO NOT REMOVE OR MODIFY THE CODE ABOVE!
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart' as cf;
 import 'package:firebase_auth/firebase_auth.dart' as fba;
@@ -80,9 +82,27 @@ ThemeData _darkTheme() {
 Widget _themed(Widget child) => Theme(data: _darkTheme(), child: child);
 
 Future<void> _openTradingView(String ticker) async {
-  final t = ticker.replaceAll('-', '.');
-  await launchUrl(Uri.parse('https://www.tradingview.com/chart/?symbol=$t'),
-      mode: LaunchMode.externalApplication);
+  String t;
+  if (ticker.endsWith('.MC')) {
+    t = 'BME:${ticker.substring(0, ticker.length - 3)}';
+  } else if (ticker.endsWith('.DE')) {
+    t = 'XETR:${ticker.substring(0, ticker.length - 3)}';
+  } else if (ticker.endsWith('.PA') || ticker.endsWith('.AS')) {
+    t = 'EURONEXT:${ticker.substring(0, ticker.length - 3)}';
+  } else {
+    t = ticker.replaceAll('-', '.');
+  }
+  final uri = Uri.parse('https://www.tradingview.com/chart/?symbol=$t');
+  // App nativa (iPad): intenta abrir directamente la app de TradingView;
+  // si iOS no la asocia a este enlace, cae al navegador.
+  if (!kIsWeb) {
+    try {
+      final ok =
+          await launchUrl(uri, mode: LaunchMode.externalNonBrowserApplication);
+      if (ok) return;
+    } catch (_) {}
+  }
+  await launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
 // ----------------------------------------------------------------- logos
@@ -173,6 +193,7 @@ const Map<String, String> _kPeriods = {
 const Map<String, String> _kRefs = {
   'sec': 'sector',
   'ind': 'industria',
+  'idx': 'su índice',
   'spy': 'S&P 500',
   'qqq': 'Nasdaq-100',
   'dia': 'Dow Jones',
@@ -225,7 +246,10 @@ List<_Field> _buildFields() {
   b('in_spx', 'En S&P 500', _cId);
   b('in_ndx', 'En Nasdaq-100', _cId);
   b('in_dow', 'En Dow Jones', _cId);
-  n('price', 'Precio (USD)', _cId, w: 82);
+  b('in_ibex', 'En IBEX 35', _cId);
+  b('in_dax', 'En DAX 40', _cId);
+  ch('market', 'Mercado', _cId, w: 86);
+  n('price', 'Precio', _cId, w: 92);
   n('mcap_b', 'Capitalización (miles de M\$)', _cId,
       dec: 1, h: 'Cap. (miles M\$)');
   n('dvol_m', 'Volumen medio diario (M\$)', _cId,
@@ -375,9 +399,14 @@ List<_Field> _buildFields() {
   d('ex_div', 'Próxima fecha ex-dividendo', _cCor, h: 'Ex-dividendo');
   n('days_to_exdiv', 'Días hasta ex-dividendo', _cCor,
       dec: 0, h: 'Días a ex-div.');
-  n('short_float', 'Short interest % del free float', _cCor,
+  n('short_float', 'Short interest % del free float (solo EE. UU.)', _cCor,
       dec: 1, h: 'Short % float');
-  n('short_ratio', 'Días para cubrir', _cCor, dec: 1);
+  n('short_ratio', 'Días para cubrir (solo EE. UU.)', _cCor,
+      dec: 1, h: 'Días para cubrir');
+  n('short_pub', 'Cortos publicados CNMV, % del capital (solo España)', _cCor,
+      dec: 2, h: 'Cortos CNMV %');
+  n('short_n', 'Fondos con cortos publicados CNMV (solo España)', _cCor,
+      dec: 0, h: 'Fondos cortos CNMV');
   return f;
 }
 
@@ -388,6 +417,7 @@ const Map<String, List<String>> _kDefaultCols = {
   'long': [
     'ticker',
     'name',
+    'market',
     'price',
     'trend',
     'd_ema20',
@@ -406,6 +436,7 @@ const Map<String, List<String>> _kDefaultCols = {
   'short': [
     'ticker',
     'name',
+    'market',
     'price',
     'trend',
     'd_ema20',
@@ -421,7 +452,8 @@ const Map<String, List<String>> _kDefaultCols = {
     'days_to_earn',
     'div_yield',
     'days_to_exdiv',
-    'short_float'
+    'short_float',
+    'short_pub'
   ],
 };
 
@@ -447,6 +479,11 @@ const Map<String, String> _kHelp = {
   'vol_rel': '1 = volumen normal. 1,5 = un 50 % más de lo habitual.',
   'rec_mean': '1 = compra fuerte, 3 = mantener, 5 = venta.',
   'eps_beats_4q': '4 = ha batido los cuatro últimos trimestres.',
+  'short_pub':
+      'Suma de las posiciones cortas netas que la CNMV publica (las de 0,5 % o más '
+          'del capital). 0 = ningún fondo supera ese umbral. Solo valores españoles.',
+  'short_n':
+      'Número de fondos con una posición corta publicada (0,5 % o más). Solo valores españoles.',
   's_ema20':
       'Cambio % de la EMA en las últimas 5 sesiones. Mínimo 0 = ascendente; máximo 0 = descendente.',
   's_ema50':
@@ -674,6 +711,8 @@ List<_Preset> _builtInPresets() => [
 // ----------------------------------------------------------------- utilidades
 
 double? _d(dynamic v) => v is num ? v.toDouble() : null;
+
+String _cur(Map<String, dynamic> r) => r['currency'] == 'EUR' ? '€' : '\$';
 
 dynamic _minN(List<dynamic> l) {
   num? m;
@@ -1041,6 +1080,8 @@ class _HomeState extends State<_Home> {
   Map<String, dynamic> _sectors = {};
   Map<String, dynamic> _industries = {};
   Map<String, dynamic> _bench = {};
+  Map<String, dynamic> _sectorsEu = {};
+  double? _fx;
   String _asof = '';
 
   String _mode = 'long';
@@ -1077,6 +1118,10 @@ class _HomeState extends State<_Home> {
 
   @override
   void dispose() {
+    if (_syncTimer?.isActive ?? false) {
+      _syncTimer!.cancel();
+      _pushSettings();
+    }
     _searchCtl.dispose();
     _riskCtl.dispose();
     _maxCtl.dispose();
@@ -1088,6 +1133,149 @@ class _HomeState extends State<_Home> {
       _prefs = await SharedPreferences.getInstance();
       _restore();
     } catch (_) {}
+    await _pullSettings();
+    _riskCtl.text = _plain(_risk);
+    _maxCtl.text = _plain(_maxPos);
+    await _load();
+  }
+
+  // ---------------------------------------------------- sincronización por usuario
+  // Favoritos, presets, filtros, columnas, orden, riesgo y posición máxima se
+  // guardan en Firestore users/{uid} para compartirlos entre dispositivos.
+  // Los anchos de columna y el modo Largos/Cortos quedan en cada dispositivo.
+
+  Timer? _syncTimer;
+  bool _syncing = false;
+
+  String? get _uid => fba.FirebaseAuth.instance.currentUser?.uid;
+
+  Map<String, dynamic> _settingsJson() => {
+        'v': 1,
+        'favs': {
+          for (final m in ['long', 'short']) m: _favs[m]!.toList()
+        },
+        'presets': _userPresets.map((e) => e.toJson()).toList(),
+        'filters': {
+          for (final m in ['long', 'short'])
+            m: _filters[m]!.map((e) => e.toJson()).toList()
+        },
+        'cols': {
+          for (final m in ['long', 'short']) m: _cols[m]
+        },
+        'sortKey': _sortKey,
+        'sortAsc': _sortAsc,
+        'risk': _risk,
+        'maxPos': _maxPos,
+      };
+
+  void _applySettings(Map<String, dynamic> j, {required bool mergeLocal}) {
+    try {
+      for (final m in ['long', 'short']) {
+        final rf = ((j['favs'] as Map?)?[m] as List?)
+            ?.map((e) => e.toString())
+            .toSet();
+        if (rf != null) {
+          _favs[m] = mergeLocal ? {..._favs[m]!, ...rf} : rf;
+        }
+        final rfl = (j['filters'] as Map?)?[m] as List?;
+        if (rfl != null) {
+          _filters[m] = rfl
+              .map((e) => _Filter.fromJson(Map<String, dynamic>.from(e as Map)))
+              .where((f) => _kFieldMap.containsKey(f.key))
+              .toList();
+        }
+        final rc = (j['cols'] as Map?)?[m] as List?;
+        if (rc != null) {
+          final c = rc
+              .map((e) => e.toString())
+              .where(_kFieldMap.containsKey)
+              .toList();
+          if (c.isNotEmpty) _cols[m] = c;
+        }
+        final sk = (j['sortKey'] as Map?)?[m];
+        if (sk is String && _kFieldMap.containsKey(sk)) _sortKey[m] = sk;
+        final sa = (j['sortAsc'] as Map?)?[m];
+        if (sa is bool) _sortAsc[m] = sa;
+      }
+      final rp = (j['presets'] as List?)
+          ?.map((e) => _Preset.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList();
+      if (rp != null) {
+        if (mergeLocal) {
+          final names = rp.map((p) => '${p.mode}|${p.name}').toSet();
+          _userPresets = [
+            ...rp,
+            ..._userPresets
+                .where((p) => !names.contains('${p.mode}|${p.name}')),
+          ];
+        } else {
+          _userPresets = rp;
+        }
+      }
+      final r = _d(j['risk']);
+      if (r != null && r > 0) _risk = r;
+      final mp = _d(j['maxPos']);
+      if (mp != null && mp > 0) _maxPos = mp;
+    } catch (_) {}
+  }
+
+  Future<void> _pullSettings() async {
+    final uid = _uid;
+    if (uid == null) return;
+    _syncing = true;
+    try {
+      final prevUid = _prefs?.getString('scr_sync_uid');
+      final doc = await cf.FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
+      final m = doc.data();
+      final remote = (m != null && m['data'] is String)
+          ? jsonDecode(m['data'] as String) as Map<String, dynamic>
+          : null;
+      if (prevUid != null && prevUid != uid) {
+        // Este dispositivo era de otro usuario: no mezclar sus ajustes.
+        for (final k in ['long', 'short']) {
+          _favs[k] = <String>{};
+          _filters[k] = [];
+        }
+        _userPresets = [];
+      }
+      final firstHere = prevUid != uid;
+      if (remote != null) {
+        _applySettings(remote, mergeLocal: firstHere && prevUid == null);
+      }
+      if (mounted) setState(() {});
+      _save(push: false);
+      await _prefs?.setString('scr_sync_uid', uid);
+      if (remote == null || (firstHere && prevUid == null))
+        await _pushSettings();
+    } catch (_) {
+      // Sin conexión o sin permisos: se sigue con los ajustes del dispositivo.
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  void _schedulePush() {
+    if (_syncing) return;
+    _syncTimer?.cancel();
+    _syncTimer = Timer(const Duration(milliseconds: 800), _pushSettings);
+  }
+
+  Future<void> _pushSettings() async {
+    final uid = _uid;
+    if (uid == null) return;
+    try {
+      await cf.FirebaseFirestore.instance.collection('users').doc(uid).set({
+        'data': jsonEncode(_settingsJson()),
+        'updated_ms': DateTime.now().millisecondsSinceEpoch,
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _refreshAll() async {
+    await _pullSettings();
     _riskCtl.text = _plain(_risk);
     _maxCtl.text = _plain(_maxPos);
     await _load();
@@ -1139,7 +1327,8 @@ class _HomeState extends State<_Home> {
     } catch (_) {}
   }
 
-  void _save() {
+  void _save({bool push = true}) {
+    if (push) _schedulePush();
     final p = _prefs;
     if (p == null) return;
     try {
@@ -1213,6 +1402,8 @@ class _HomeState extends State<_Home> {
         _industries =
             Map<String, dynamic>.from((j['industries'] as Map?) ?? {});
         _bench = Map<String, dynamic>.from((j['benchmarks'] as Map?) ?? {});
+        _sectorsEu = Map<String, dynamic>.from((j['sectors_eu'] as Map?) ?? {});
+        _fx = _d(((j['fx'] as Map?) ?? {})['EURUSD']);
         _asof = (j['asof'] ?? '').toString();
         _loading = false;
       });
@@ -1270,11 +1461,14 @@ class _HomeState extends State<_Home> {
     _save();
   }
 
-  void _applyGroupFilter(String key, String value) {
+  void _applyGroupFilter(String key, String value, {Set<String>? markets}) {
     setState(() {
       final fs = _filters[_mode]!;
-      fs.removeWhere((f) => f.key == 'sector' || f.key == 'ind_name');
+      fs.removeWhere(
+          (f) => f.key == 'sector' || f.key == 'ind_name' || f.key == 'market');
       fs.add(_Filter(key, values: {value}));
+      if (markets != null) fs.add(_Filter('market', values: markets));
+      _onlyFav[_mode] = false;
       _tab = 0;
     });
     _save();
@@ -1385,7 +1579,7 @@ class _HomeState extends State<_Home> {
       final rsi = _d(r['rsi_d']);
       b.writeln();
       b.writeln(
-          '${r['ticker']} · ${r['name']} — ${price == null ? '–' : _num(price, 2)} \$');
+          '${r['ticker']} · ${r['name']} — ${price == null ? '–' : _num(price, 2)} ${_cur(r)}');
       b.writeln('EMA20 ${p(r['d_ema20'])} · EMA50 ${p(r['d_ema50'])} · '
           'EMA200 ${p(r['d_ema200'])} · RSI ${rsi == null ? '–' : _num(rsi, 0)} · '
           'tendencia ${r['trend'] ?? '–'}');
@@ -1580,6 +1774,7 @@ class _HomeState extends State<_Home> {
                 mode: _mode,
                 risk: _risk,
                 maxPos: _maxPos,
+                fx: _fx,
                 accent: _accent,
                 accentFill: _accentFill,
                 onClose: _closeDetail,
@@ -1685,7 +1880,7 @@ class _HomeState extends State<_Home> {
       IconButton(
         tooltip: 'Recargar datos',
         icon: const Icon(Icons.refresh, color: _cText),
-        onPressed: _loading ? null : _load,
+        onPressed: _loading ? null : _refreshAll,
       ),
       Container(width: 1, height: 28, color: _cBorder),
       const SizedBox(width: 6),
@@ -2160,6 +2355,8 @@ class _HomeState extends State<_Home> {
     }
 
     final secs = mk(_sectors, true);
+    final secsEu =
+        mk(_sectorsEu, true).where((m) => (m['count'] ?? 0) != 0).toList();
     final inds = mk(_industries, false);
     final bench = mk(_bench, false);
 
@@ -2236,7 +2433,7 @@ class _HomeState extends State<_Home> {
         const SizedBox(height: 10),
         _Grid(cols: base, rows: bench, shrink: true, accent: _accent),
         const SizedBox(height: 30),
-        const Text('Sectores', style: h),
+        const Text('Sectores EE. UU.', style: h),
         const SizedBox(height: 4),
         const Text('Toca un sector para filtrar el screener por él.',
             style: sub),
@@ -2246,10 +2443,27 @@ class _HomeState extends State<_Home> {
           rows: secs,
           shrink: true,
           accent: _accent,
-          onTap: (m) => _applyGroupFilter('sector', m['_id'].toString()),
+          onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
+              markets: {'EE. UU.'}),
         ),
         const SizedBox(height: 30),
-        const Text('Industrias', style: h),
+        const Text('Sectores Europa (IBEX 35 + DAX 40)', style: h),
+        const SizedBox(height: 4),
+        const Text(
+            'Referencia: ETFs iShares STOXX Europe 600 de cada sector. '
+            'Toca un sector para filtrar los valores españoles y alemanes.',
+            style: sub),
+        const SizedBox(height: 10),
+        _Grid(
+          cols: [...base, ...pe],
+          rows: secsEu,
+          shrink: true,
+          accent: _accent,
+          onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
+              markets: {'España', 'Alemania'}),
+        ),
+        const SizedBox(height: 30),
+        const Text('Industrias EE. UU.', style: h),
         const SizedBox(height: 4),
         const Text(
             'PER agregado = suma de capitalizaciones ÷ suma de beneficios de las '
@@ -2359,7 +2573,10 @@ class _GridCol {
         width: width ?? f.width,
         right: f.kind == _Kind.number,
         bold: f.key == 'ticker' || f.key == 'hb_rr' || f.key == 'hs_rr',
-        text: (r) => _fmt(f, r[f.key]),
+        text: f.key == 'price'
+            ? (r) =>
+                r['price'] == null ? '–' : '${_fmt(f, r['price'])} ${_cur(r)}'
+            : (r) => _fmt(f, r[f.key]),
         color: (r) => _colorFor(f, r[f.key]),
         leading: f.key == 'ticker'
             ? (r) => r['has_logo'] == true
@@ -3279,6 +3496,7 @@ class _Detail extends StatefulWidget {
     required this.mode,
     required this.risk,
     required this.maxPos,
+    required this.fx,
     required this.accent,
     required this.accentFill,
   });
@@ -3287,6 +3505,7 @@ class _Detail extends StatefulWidget {
   final String mode;
   final double risk;
   final double maxPos;
+  final double? fx;
   final Color accent;
   final Color accentFill;
   final VoidCallback onClose;
@@ -3411,6 +3630,8 @@ class _DetailState extends State<_Detail> {
       if (r['in_ndx'] == true) 'Nasdaq-100',
       if (r['in_dow'] == true) 'Dow Jones',
       if (r['in_spx'] == true) 'S&P 500',
+      if (r['in_ibex'] == true) 'IBEX 35',
+      if (r['in_dax'] == true) 'DAX 40',
     ].join(' · ');
     final tickerBox = Container(
       width: 58,
@@ -3620,8 +3841,13 @@ class _DetailState extends State<_Detail> {
       );
     }
     final dist = _long ? px - stop! : stop! - px;
-    final byRisk = widget.risk / dist;
-    final byCap = widget.maxPos / px;
+    final eur = r['currency'] == 'EUR';
+    final fx = (eur && widget.fx != null && widget.fx! > 0) ? widget.fx! : 1.0;
+    final cs = _cur(r);
+    final risk = widget.risk / fx;
+    final maxPos = widget.maxPos / fx;
+    final byRisk = risk / dist;
+    final byCap = maxPos / px;
     final shares = (math.min(byRisk, byCap) / 5).floor() * 5;
     final capital = shares * px;
     final realRisk = shares * dist;
@@ -3641,19 +3867,30 @@ class _DetailState extends State<_Detail> {
       final dy = _d(r['div_yield']) ?? 0;
       if (dy > 0) {
         chips.add(_chip(
-            'Dividendo a pagar (año)', '\$${_num(capital * dy / 100, 0)}'));
+            'Dividendo a pagar (año)', '${_num(capital * dy / 100, 0)} $cs'));
       }
       final dx = r['days_to_exdiv'];
       if (dx != null) chips.add(_chip('Ex-dividendo en', '$dx días'));
       final sf = _d(r['short_float']);
       if (sf != null) chips.add(_chip('Short % float', '${_num(sf, 1)} %'));
+      final sp = _d(r['short_pub']);
+      if (sp != null) {
+        chips.add(_chip(
+            'Cortos CNMV',
+            sp == 0
+                ? 'ninguno ≥ 0,5 %'
+                : '${_num(sp, 2)} % · ${r['short_n']} fondos'));
+      }
     }
-    chips.add(_chip('Riesgo y posición máx.',
-        '\$${_num(widget.risk, 0)} · \$${_num(widget.maxPos, 0)}'));
+    chips.add(_chip(
+        'Riesgo y posición máx.',
+        eur
+            ? '${_num(risk, 0)} € · ${_num(maxPos, 0)} € (EUR/USD ${_num(fx, 4)})'
+            : '\$${_num(widget.risk, 0)} · \$${_num(widget.maxPos, 0)}'));
     final tiles = [
       _tile('Acciones', '$shares'),
-      _tile('Importe', '\$${_num(capital, 0)}'),
-      _tile('Riesgo real', '\$${_num(realRisk, 0)}'),
+      _tile('Importe', '${_num(capital, 0)} $cs'),
+      _tile('Riesgo real', '${_num(realRisk, 0)} $cs'),
       _tile('Distancia al stop', '${_num(dist / px * 100, 1)} %'),
     ];
     return Column(
