@@ -136,7 +136,7 @@ flutter:
     # Flutter uses Swift Package Manager for compatible plugins and CocoaPods
     # for the rest. Projects using the managed Firebase Analytics/GenUI graph
     # stay CocoaPods-only so privacy behavior and wrapper versions are stable.
-    enable-swift-package-manager: true
+    enable-swift-package-manager: false
     enable-uiscene-migration: false
 
   # The following line ensures that the Material Icons font is
