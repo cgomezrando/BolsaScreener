@@ -251,6 +251,8 @@ List<_Field> _buildFields() {
   b('in_dow', 'En Dow Jones', _cId);
   b('in_ibex', 'En IBEX 35', _cId);
   b('in_dax', 'En DAX 40', _cId);
+  b('in_nasdaq', 'Cotiza en Nasdaq', _cId);
+  b('in_nyse', 'Cotiza en NYSE', _cId);
   ch('market', 'Mercado', _cId, w: 86);
   n('price', 'Precio', _cId, w: 92);
   n('mcap_b', 'Capitalización (miles de M\$)', _cId,
@@ -4207,6 +4209,10 @@ class _DetailState extends State<_Detail> {
       if (r['in_spx'] == true) 'S&P 500',
       if (r['in_ibex'] == true) 'IBEX 35',
       if (r['in_dax'] == true) 'DAX 40',
+      if (r['in_spx'] != true && r['in_ndx'] != true && r['in_nasdaq'] == true)
+        'Nasdaq (fuera de índices)',
+      if (r['in_spx'] != true && r['in_nyse'] == true)
+        'NYSE (fuera de índices)',
     ].join(' · ');
     final tickerBox = Container(
       width: 58,
