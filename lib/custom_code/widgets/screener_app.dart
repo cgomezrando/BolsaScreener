@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart' as cf;
 import 'package:firebase_auth/firebase_auth.dart' as fba;
 import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -40,6 +41,12 @@ const Color _kRed = Color(0xFFE5534B);
 const Color _kRedFill = Color(0xFFB33A34);
 const Color _kStar = Color(0xFFF5C451);
 const Color _kAmber = Color(0xFFE0A93B);
+
+// Cloud Function que lanza el job en modo intradía (botón "Actualizar ahora").
+const String _kRefreshUrl =
+    'https://europe-west1-bolsascreener.cloudfunctions.net/screener-refresh';
+const Duration _kJobPoll = Duration(seconds: 20);
+const Duration _kJobTimeout = Duration(minutes: 20);
 
 ThemeData _darkTheme() {
   final base = ThemeData(brightness: Brightness.dark, useMaterial3: true);
@@ -1242,6 +1249,15 @@ class _HomeState extends State<_Home> {
   Map<String, dynamic> _regime = {};
   bool _showRed = false;
   String _asof = '';
+  String _snapMode = 'close';
+  String _updatedIso = '';
+
+  // Actualización bajo demanda (job en modo intradía)
+  bool _jobRunning = false;
+  DateTime? _jobStart;
+  String? _jobBaseline;
+  Timer? _jobPoll;
+  Timer? _jobTick;
 
   String _mode = 'long';
   int _tab = 0;
@@ -1277,6 +1293,8 @@ class _HomeState extends State<_Home> {
 
   @override
   void dispose() {
+    _jobPoll?.cancel();
+    _jobTick?.cancel();
     if (_syncTimer?.isActive ?? false) {
       _syncTimer!.cancel();
       _pushSettings();
@@ -1567,6 +1585,8 @@ class _HomeState extends State<_Home> {
         _regime = Map<String, dynamic>.from((j['regime'] as Map?) ?? {});
         _computePlans();
         _asof = (j['asof'] ?? '').toString();
+        _snapMode = (j['mode'] ?? 'close').toString();
+        _updatedIso = (j['updated'] ?? '').toString();
         _loading = false;
       });
     } catch (e) {
@@ -1574,6 +1594,122 @@ class _HomeState extends State<_Home> {
       setState(() {
         _error = e.toString();
         _loading = false;
+      });
+    }
+  }
+
+  // ---------------------------------------------------- actualización bajo demanda
+
+  bool get _isIntraday => _snapMode == 'intraday';
+
+  /// "Cierre del 27-10-2026" o "Intradía 28-10 16:45 (provisional)".
+  String _asofLabel({bool lower = false}) {
+    if (_isIntraday) {
+      final t = DateTime.tryParse(_updatedIso)?.toLocal();
+      final hm = t == null
+          ? ''
+          : ' ${_two(t.day)}-${_two(t.month)} ${_two(t.hour)}:${_two(t.minute)}';
+      return '${lower ? 'intradía' : 'Intradía'}$hm (provisional)';
+    }
+    return '${lower ? 'cierre del' : 'Cierre del'} ${_fmtDate(_asof)}';
+  }
+
+  static String _two(int n) => n.toString().padLeft(2, '0');
+
+  String _elapsed() {
+    final s =
+        _jobStart == null ? 0 : DateTime.now().difference(_jobStart!).inSeconds;
+    return '${s ~/ 60}:${_two(s % 60)}';
+  }
+
+  Future<String?> _latestUpdated() async {
+    try {
+      final d = await cf.FirebaseFirestore.instance
+          .collection('screener')
+          .doc('latest')
+          .get(const cf.GetOptions(source: cf.Source.server));
+      return (d.data()?['updated_iso'] ?? '').toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _runNow() async {
+    if (_jobRunning) return;
+    final user = fba.FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    setState(() {
+      _jobRunning = true;
+      _jobStart = DateTime.now();
+    });
+    try {
+      final token = await user.getIdToken();
+      final res = await http
+          .post(Uri.parse(_kRefreshUrl),
+              headers: {
+                'Authorization': 'Bearer $token',
+                'Content-Type': 'application/json'
+              },
+              body: '{}')
+          .timeout(const Duration(seconds: 30));
+      Map<String, dynamic> body = {};
+      try {
+        body = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
+      } catch (_) {}
+      final status = (body['status'] ?? '').toString();
+      if (status == 'started' || status == 'running') {
+        _toast(status == 'started'
+            ? 'Descargando datos… tarda unos minutos'
+            : 'Ya hay una actualización en marcha, espero a que termine');
+        await _startJobPoll();
+        return;
+      }
+      if (status == 'cooldown') {
+        final w = ((body['wait'] as num?)?.toInt() ?? 60);
+        _toast('Espera ${(w / 60).ceil()} min antes de otra actualización');
+      } else {
+        _toast(
+            'No se pudo lanzar: ${body['msg'] ?? 'error ${res.statusCode}'}');
+      }
+    } catch (e) {
+      _toast('No se pudo lanzar la actualización: $e');
+    }
+    _stopJob();
+  }
+
+  Future<void> _startJobPoll() async {
+    _jobBaseline = await _latestUpdated() ?? _updatedIso;
+    _jobTick?.cancel();
+    _jobTick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+    _jobPoll?.cancel();
+    _jobPoll = Timer.periodic(_kJobPoll, (_) async {
+      if (_jobStart != null &&
+          DateTime.now().difference(_jobStart!) > _kJobTimeout) {
+        _stopJob();
+        _toast(
+            'La actualización está tardando demasiado; revisa los logs del job');
+        return;
+      }
+      final u = await _latestUpdated();
+      if (u != null && u.isNotEmpty && u != _jobBaseline) {
+        _stopJob();
+        await _load();
+        _toast('Datos actualizados (${_asofLabel(lower: true)})');
+      }
+    });
+  }
+
+  void _stopJob() {
+    _jobPoll?.cancel();
+    _jobTick?.cancel();
+    _jobPoll = null;
+    _jobTick = null;
+    if (mounted) {
+      setState(() {
+        _jobRunning = false;
+        _jobStart = null;
       });
     }
   }
@@ -1966,7 +2102,7 @@ class _HomeState extends State<_Home> {
     final eu = _regime['eu'] as Map?;
     final b = StringBuffer();
     b.writeln(
-        '${long ? 'Favoritos largos' : 'Favoritos cortos'} · cierre del ${_fmtDate(_asof)}');
+        '${long ? 'Favoritos largos' : 'Favoritos cortos'} · ${_asofLabel(lower: true)}');
     if (_regime.isNotEmpty) {
       b.writeln(
           'Mercado EE. UU.: ${st('us')} (SPY ${sg(us?['spy_ema20'])} s/EMA20, '
@@ -2040,7 +2176,7 @@ class _HomeState extends State<_Home> {
   Future<void> _shareFavs() async {
     final long = _mode == 'long';
     final title =
-        '${long ? 'Favoritos largos' : 'Favoritos cortos'} · cierre del ${_fmtDate(_asof)}';
+        '${long ? 'Favoritos largos' : 'Favoritos cortos'} · ${_asofLabel(lower: true)}';
     final res = await showDialog<String>(
       context: context,
       builder: (_) => _themed(_ShareDialog(
@@ -2307,12 +2443,30 @@ class _HomeState extends State<_Home> {
 
   Widget _topBar(bool wide) {
     final right = <Widget>[
-      if (_asof.isNotEmpty)
-        Text('Cierre del ${_fmtDate(_asof)}',
-            style: const TextStyle(fontSize: 14, color: _cMuted)),
+      if (_jobRunning)
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: _kGreen)),
+          const SizedBox(width: 8),
+          Text('Actualizando… ${_elapsed()}',
+              style: const TextStyle(fontSize: 14, color: _kGreen)),
+        ])
+      else if (_asof.isNotEmpty)
+        Text(_asofLabel(),
+            style: TextStyle(
+                fontSize: 14, color: _isIntraday ? _kAmber : _cMuted)),
       const SizedBox(width: 8),
       IconButton(
-        tooltip: 'Recargar datos',
+        tooltip:
+            'Descargar datos ahora (unos minutos; vela de hoy provisional)',
+        icon: Icon(Icons.cloud_download_outlined,
+            color: _jobRunning ? _cMuted : _cText),
+        onPressed: (_loading || _jobRunning) ? null : _runNow,
+      ),
+      IconButton(
+        tooltip: 'Recargar datos guardados',
         icon: const Icon(Icons.refresh, color: _cText),
         onPressed: _loading ? null : _refreshAll,
       ),
