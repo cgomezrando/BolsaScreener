@@ -278,10 +278,10 @@ List<_Field> _buildFields() {
   n('p_stop', 'Stop', _cPlan, w: 96);
   n('p_stop_pct', 'Distancia al stop %', _cPlan, w: 76, h: 'Stop %');
   n('p_stop_atr', 'Distancia al stop en ATR', _cPlan, w: 76, h: 'Stop en ATR');
-  n('p_target', 'Objetivo (siguiente máximo/mínimo relevante, máx. 2,5 ATR)',
+  n('p_target', 'Objetivo (siguiente máximo/mínimo relevante, con tope en ATR)',
       _cPlan,
       w: 96, h: 'Objetivo');
-  b('p_target_cap', 'Objetivo limitado a 2,5 ATR', _cPlan,
+  b('p_target_cap', 'Objetivo limitado por el tope en ATR', _cPlan,
       w: 80, h: 'Obj. limitado');
   n('p_target_pct', 'Recorrido hasta el objetivo %', _cPlan,
       w: 84, h: 'Recorrido %');
@@ -553,12 +553,10 @@ const Map<String, String> _kHelp = {
   'p_stop_atr':
       'Distancia del stop en ATRs. Menos de 1 = el stop puede saltar por ruido; 1,5 o más es holgado.',
   'p_rr': 'Recorrido hasta el objetivo dividido por la distancia al stop. El objetivo es el siguiente '
-      'máximo relevante (mínimo en cortos), como mucho a 2,5 ATR de la entrada.',
-  'swing_ok': 'Largos: precio y EMAs en orden, resultados a más de 21 días, stop ≥ 1 ATR, B/R ≥ 1,5, '
-      'volumen ≥ 50 M\$, riesgo usado ≥ 60 %, precio no fijado y, en EE. UU., capitalización ≥ 2.000 M\$. '
-      'Cortos: igual pero con resultados a más de 14 días, volumen ≥ 100 M\$, precio ≥ 10 \$, '
-      'capitalización ≥ 5.000 M\$ en EE. UU., sin '
-      'ex-dividendo en los próximos 14 días, préstamo disponible ≥ 5× tu posición y tasa ≤ 1 % anual.',
+      'máximo relevante (mínimo en cortos), con el tope en ATR de los filtros duros.',
+  'swing_ok':
+      'Pasa todos los filtros duros activos. Se ven y se cambian en «Filtros duros», '
+          'en el panel de filtros (unos para largos y otros para cortos).',
   'borrow_fee':
       'Coste anual de pedir prestadas las acciones en IBKR. Por encima del 1 % se come buena '
           'parte del recorrido de dos semanas.',
@@ -825,18 +823,153 @@ double? _d(dynamic v) => v is num ? v.toDouble() : null;
 
 String _cur(Map<String, dynamic> r) => r['currency'] == 'EUR' ? '€' : '\$';
 
-const double _kTargetAtrCap = 2.5;
-const int _kEarnDaysLong = 21;
-const int _kEarnDaysShort = 14;
-// Cortos: liquidez y tamaño mínimos (en dólares; los europeos se convierten con EUR/USD)
-const double _kShortMinDvolM = 100;
-const double _kShortMinPrice = 10;
-const double _kShortMinMcapB = 5; // solo valores de EE. UU.
-const double _kLongMinMcapB = 2; // solo valores de EE. UU.
-const int _kShortExDivDays = 14;
-const double _kShortMinBorrowX = 5;
-const double _kShortMaxBorrowFee = 1.0;
-const double _kLongMinDvolM = 50;
+// ----------------------------------------------------------------- filtros duros (editables)
+// Los valores en dólares se aplican a los europeos convirtiendo con EUR/USD.
+
+class _Rule {
+  _Rule(this.on, this.v);
+  bool on;
+  double v;
+  _Rule copy() => _Rule(on, v);
+}
+
+class _RuleSpec {
+  const _RuleSpec(this.key, this.label, this.text,
+      {this.unit = '',
+      this.dec = 0,
+      this.only,
+      this.help,
+      this.hasValue = true});
+  final String key;
+  final String label; // en el editor
+  final String text; // resumen; {v} = valor
+  final String unit;
+  final int dec;
+  final String? only; // 'long' / 'short' / null = ambos
+  final String? help;
+  final bool hasValue;
+}
+
+const List<_RuleSpec> _kRuleSpecs = [
+  _RuleSpec('pinned', 'Excluir precio fijado (posible OPA)',
+      'Sin precio fijado (OPA)',
+      hasValue: false,
+      help:
+          'ATR < 0,6 % y rango de 20 sesiones < 2 %: suele ser una OPA en efectivo.'),
+  _RuleSpec('price', 'Precio mínimo', 'Precio ≥ {v} \$', unit: '\$', dec: 0),
+  _RuleSpec('mcap', 'Capitalización mínima (solo EE. UU.)',
+      'Capitalización ≥ {v} M\$ (EE. UU.)',
+      unit: 'M\$'),
+  _RuleSpec('ema', 'EMAs en orden', 'EMAs en orden',
+      hasValue: false,
+      help:
+          'Largos: precio sobre EMA20 y EMA50, y EMA50 sobre EMA200. Cortos: al revés.'),
+  _RuleSpec('earn', 'Resultados a más de', 'Resultados a más de {v} días',
+      unit: 'días'),
+  _RuleSpec('exdiv', 'Ex-dividendo a más de', 'Sin ex-dividendo en {v} días',
+      unit: 'días', help: 'En corto pagas tú el dividendo.'),
+  _RuleSpec('stop_atr', 'Stop mínimo', 'Stop ≥ {v} ATR', unit: 'ATR', dec: 1),
+  _RuleSpec('rr', 'B/R mínimo', 'B/R ≥ {v}', dec: 1),
+  _RuleSpec('target_cap', 'Objetivo como máximo a', 'Objetivo tope {v} ATR',
+      unit: 'ATR',
+      dec: 1,
+      help:
+          'No descarta: limita el objetivo (y por tanto el B/R). Desactivado = sin tope.'),
+  _RuleSpec('dvol', 'Volumen medio mínimo', 'Volumen ≥ {v} M\$/día',
+      unit: 'M\$/día'),
+  _RuleSpec('risk_pct', 'Riesgo usado mínimo', 'Riesgo usado ≥ {v} %',
+      unit: '%',
+      help:
+          'Riesgo real de la posición en % de tu riesgo máximo (lo limita la posición máxima).'),
+  _RuleSpec(
+      'borrow_x', 'Préstamo disponible mínimo', 'Préstamo ≥ {v}× tu posición',
+      unit: '× posición',
+      only: 'short',
+      help: 'Acciones disponibles en IBKR entre las de tu posición.'),
+  _RuleSpec('fee', 'Tasa de préstamo máxima', 'Tasa de préstamo ≤ {v} %',
+      unit: '% anual', dec: 1, only: 'short'),
+];
+
+final Map<String, _RuleSpec> _kRuleSpecMap = {
+  for (final r in _kRuleSpecs) r.key: r
+};
+
+Map<String, Map<String, _Rule>> _defaultRules() => {
+      'long': {
+        'pinned': _Rule(true, 0),
+        'price': _Rule(false, 10),
+        'mcap': _Rule(true, 2000),
+        'ema': _Rule(true, 0),
+        'earn': _Rule(true, 21),
+        'exdiv': _Rule(false, 14),
+        'stop_atr': _Rule(true, 1),
+        'rr': _Rule(true, 1.5),
+        'target_cap': _Rule(true, 2.5),
+        'dvol': _Rule(true, 50),
+        'risk_pct': _Rule(true, 60),
+      },
+      'short': {
+        'pinned': _Rule(true, 0),
+        'price': _Rule(true, 10),
+        'mcap': _Rule(true, 5000),
+        'ema': _Rule(true, 0),
+        'earn': _Rule(true, 14),
+        'exdiv': _Rule(true, 14),
+        'stop_atr': _Rule(true, 1),
+        'rr': _Rule(true, 1.5),
+        'target_cap': _Rule(true, 2.5),
+        'dvol': _Rule(true, 100),
+        'risk_pct': _Rule(true, 60),
+        'borrow_x': _Rule(true, 5),
+        'fee': _Rule(true, 1),
+      },
+    };
+
+/// Filtros duros vigentes (los edita el usuario; se sincronizan con sus ajustes).
+Map<String, Map<String, _Rule>> _hard = _defaultRules();
+
+_Rule _rule(String mode, String key) =>
+    _hard[mode]?[key] ?? _defaultRules()[mode]![key] ?? _Rule(false, 0);
+
+/// Valor del filtro si está activo, si no null.
+double? _ruleOn(String mode, String key) {
+  final r = _rule(mode, key);
+  return r.on ? r.v : null;
+}
+
+String _ruleText(String mode, _RuleSpec sp) {
+  final r = _rule(mode, sp.key);
+  return sp.text
+      .replaceAll('{v}', _num(r.v, r.v == r.v.roundToDouble() ? 0 : sp.dec));
+}
+
+Map<String, dynamic> _rulesToJson() => {
+      for (final m in _hard.keys)
+        m: {
+          for (final e in _hard[m]!.entries) e.key: [e.value.on, e.value.v]
+        }
+    };
+
+void _rulesFromJson(dynamic j) {
+  if (j is! Map) return;
+  final out = _defaultRules();
+  for (final m in out.keys) {
+    final mm = j[m];
+    if (mm is! Map) continue;
+    for (final k in out[m]!.keys) {
+      final v = mm[k];
+      if (v is List && v.length == 2 && v[0] is bool && v[1] is num) {
+        out[m]![k] = _Rule(v[0] as bool, (v[1] as num).toDouble());
+      }
+    }
+  }
+  _hard = out;
+}
+
+String _capLabel(String mode) {
+  final c = _ruleOn(mode, 'target_cap');
+  return c == null ? 'tope' : '${_num(c, c == c.roundToDouble() ? 0 : 1)} ATR';
+}
 
 const Set<String> _kMoneyKeys = {
   'price',
@@ -973,9 +1106,11 @@ Color? _colorFor(_Field f, dynamic v) {
       case 'score':
         return v >= 70 ? _kGreen : (v < 40 ? _cMuted : null);
       case 'borrow_fee':
-        return v > _kShortMaxBorrowFee ? _kRed : null;
+        final mf = _ruleOn('short', 'fee');
+        return (mf != null && v > mf) ? _kRed : null;
       case 'borrow_x':
-        return v < _kShortMinBorrowX ? _kRed : null;
+        final mb = _ruleOn('short', 'borrow_x');
+        return (mb != null && v < mb) ? _kRed : null;
       case 'mkt_mult':
         return v >= 1 ? _kGreen : (v < 0.7 ? _kRed : _kAmber);
       case 'adx':
@@ -1343,6 +1478,7 @@ class _HomeState extends State<_Home> {
         'sortAsc': _sortAsc,
         'risk': _risk,
         'maxPos': _maxPos,
+        'hard': _rulesToJson(),
       };
 
   void _applySettings(Map<String, dynamic> j, {required bool mergeLocal}) {
@@ -1393,6 +1529,7 @@ class _HomeState extends State<_Home> {
       if (r != null && r > 0) _risk = r;
       final mp = _d(j['maxPos']);
       if (mp != null && mp > 0) _maxPos = mp;
+      if (j['hard'] != null) _rulesFromJson(j['hard']);
     } catch (_) {}
   }
 
@@ -1502,6 +1639,8 @@ class _HomeState extends State<_Home> {
       }
       _risk = p.getDouble('scr_risk') ?? _risk;
       _maxPos = p.getDouble('scr_maxpos') ?? _maxPos;
+      final hs = p.getString('scr_hard');
+      if (hs != null) _rulesFromJson(jsonDecode(hs));
     } catch (_) {}
   }
 
@@ -1525,6 +1664,7 @@ class _HomeState extends State<_Home> {
           jsonEncode(_userPresets.map((e) => e.toJson()).toList()));
       p.setDouble('scr_risk', _risk);
       p.setDouble('scr_maxpos', _maxPos);
+      p.setString('scr_hard', jsonEncode(_rulesToJson()));
     } catch (_) {}
   }
 
@@ -1759,10 +1899,9 @@ class _HomeState extends State<_Home> {
       final atrAbs = (atrp != null && atrp > 0) ? atrp * px / 100 : null;
       var tgt = long ? _d(r['tgt_l']) : _d(r['tgt_s']);
       var capped = false;
-      if (atrAbs != null) {
-        final cap = long
-            ? entry + _kTargetAtrCap * atrAbs
-            : entry - _kTargetAtrCap * atrAbs;
+      final capAtr = _ruleOn(_mode, 'target_cap');
+      if (atrAbs != null && capAtr != null) {
+        final cap = long ? entry + capAtr * atrAbs : entry - capAtr * atrAbs;
         if (tgt == null || (long ? tgt > cap : tgt < cap)) {
           tgt = cap;
           capped = true;
@@ -1796,78 +1935,188 @@ class _HomeState extends State<_Home> {
       r['discard'] = why;
       r['swing_ok'] = why == null;
     }
+    // La puntuación se calcula una vez sobre todos los que pasan los filtros duros,
+    // así no cambia según los filtros de la tabla, la búsqueda o los favoritos.
+    _score(_rows);
   }
 
-  /// Filtros duros del swing de 2 semanas. Devuelve el primer motivo de descarte o null.
+  /// Filtros duros del swing de 2 semanas (editables en «Filtros duros»).
+  /// Devuelve el primer motivo de descarte o null.
   String? _swingFail(Map<String, dynamic> r, bool long) {
+    final m = long ? 'long' : 'short';
     double? g(String k) => _d(r[k]);
-    if (r['pinned'] == true) return 'precio fijado (posible OPA)';
+    double? on(String k) => _ruleOn(m, k);
+    String n0(double v, [int dec = 0]) =>
+        _num(v, v == v.roundToDouble() ? 0 : dec);
     final fx = (r['currency'] == 'EUR' && _fx != null && _fx! > 0) ? _fx! : 1.0;
-    if (!long) {
+
+    if (on('pinned') != null && r['pinned'] == true)
+      return 'precio fijado (posible OPA)';
+    final minPx = on('price');
+    if (minPx != null) {
       final px = g('price');
-      if (px == null || px * fx < _kShortMinPrice) {
-        return 'precio ${px == null ? '–' : '${_num(px * fx, 2)} \$'} (< ${_kShortMinPrice.toInt()} \$)';
+      if (px == null || px * fx < minPx) {
+        return 'precio ${px == null ? '–' : '${_num(px * fx, 2)} \$'} (< ${n0(minPx, 2)} \$)';
       }
     }
-    // Capitalización mínima solo para EE. UU.: 2.000 M$ en largos, 5.000 M$ en cortos.
-    if (r['currency'] != 'EUR') {
-      final minMc = long ? _kLongMinMcapB : _kShortMinMcapB;
+    final minMc = on('mcap');
+    if (minMc != null && r['currency'] != 'EUR') {
       final mc = g('mcap_b');
-      if (mc == null || mc < minMc) {
+      if (mc == null || mc * 1000 < minMc) {
         return 'capitalización ${mc == null ? '–' : '${_num(mc * 1000, 0)} M\$'} '
-            '(< ${_num(minMc * 1000, 0)} M\$)';
+            '(< ${_num(minMc, 0)} M\$)';
       }
     }
-    final e20 = g('d_ema20'), e50 = g('d_ema50'), e5200 = g('d_e50_200');
-    if (e20 == null || e50 == null || e5200 == null) return 'sin datos de EMAs';
-    if (long) {
-      if (e20 <= 0) return 'bajo la EMA20';
-      if (e50 <= 0) return 'bajo la EMA50';
-      if (e5200 <= 0) return 'EMA50 bajo la EMA200';
-    } else {
-      if (e20 >= 0) return 'sobre la EMA20';
-      if (e50 >= 0) return 'sobre la EMA50';
-      if (e5200 >= 0) return 'EMA50 sobre la EMA200';
+    if (on('ema') != null) {
+      final e20 = g('d_ema20'), e50 = g('d_ema50'), e5200 = g('d_e50_200');
+      if (e20 == null || e50 == null || e5200 == null)
+        return 'sin datos de EMAs';
+      if (long) {
+        if (e20 <= 0) return 'bajo la EMA20';
+        if (e50 <= 0) return 'bajo la EMA50';
+        if (e5200 <= 0) return 'EMA50 bajo la EMA200';
+      } else {
+        if (e20 >= 0) return 'sobre la EMA20';
+        if (e50 >= 0) return 'sobre la EMA50';
+        if (e5200 >= 0) return 'EMA50 sobre la EMA200';
+      }
     }
-    final de = g('days_to_earn');
-    if (de == null) return 'sin fecha de resultados';
-    // Largos: más de 21 días naturales. Cortos (se sale antes): más de 14.
-    final minDays = long ? _kEarnDaysLong : _kEarnDaysShort;
-    if (de <= minDays) return 'resultados en ${de.toInt()} días (≤ $minDays)';
-    if (!long) {
+    final minDays = on('earn');
+    if (minDays != null) {
+      final de = g('days_to_earn');
+      if (de == null) return 'sin fecha de resultados';
+      if (de <= minDays)
+        return 'resultados en ${de.toInt()} días (≤ ${n0(minDays)})';
+    }
+    final xdDays = on('exdiv');
+    if (xdDays != null) {
       final xd = g('days_to_exdiv');
-      if (xd != null && xd <= _kShortExDivDays) {
-        return 'ex-dividendo en ${xd.toInt()} días (≤ $_kShortExDivDays)';
+      if (xd != null && xd <= xdDays) {
+        return 'ex-dividendo en ${xd.toInt()} días (≤ ${n0(xdDays)})';
       }
     }
-    final sa = g('p_stop_atr');
-    if (sa == null) return 'sin plan de entrada';
-    if (sa < 1) return 'stop a ${_num(sa, 1)} ATR (< 1)';
-    final rr = g('p_rr');
-    if (rr == null || rr < 1.5)
-      return 'B/R ${rr == null ? '–' : _num(rr, 2)} (< 1,5)';
+    final minSa = on('stop_atr');
+    final minRr = on('rr');
+    if ((minSa != null || minRr != null) && g('p_entry') == null)
+      return 'sin plan de entrada';
+    if (minSa != null) {
+      final sa = g('p_stop_atr');
+      if (sa == null || sa < minSa) {
+        return 'stop a ${sa == null ? '–' : _num(sa, 1)} ATR (< ${n0(minSa, 1)})';
+      }
+    }
+    if (minRr != null) {
+      final rr = g('p_rr');
+      if (rr == null || rr < minRr)
+        return 'B/R ${rr == null ? '–' : _num(rr, 2)} (< ${n0(minRr, 2)})';
+    }
     if (!long) {
-      final av = g('borrow_avail');
-      final fee = g('borrow_fee');
-      if (av == null) return 'sin datos de préstamo (IBKR)';
-      final bx = g('borrow_x');
-      if (bx == null || bx < _kShortMinBorrowX) {
-        return 'préstamo disponible ${bx == null ? '–' : '${_num(bx, 1)}×'} tu posición '
-            '(< ${_kShortMinBorrowX.toInt()}×)';
+      final minBx = on('borrow_x');
+      final maxFee = on('fee');
+      if ((minBx != null || maxFee != null) && g('borrow_avail') == null) {
+        return 'sin datos de préstamo (IBKR)';
       }
-      if (fee == null || fee > _kShortMaxBorrowFee) {
-        return 'tasa de préstamo ${fee == null ? '–' : _num(fee, 2)} % (> ${_num(_kShortMaxBorrowFee, 0)} %)';
+      if (minBx != null) {
+        final bx = g('borrow_x');
+        if (bx == null || bx < minBx) {
+          return 'préstamo disponible ${bx == null ? '–' : '${_num(bx, 1)}×'} tu posición '
+              '(< ${n0(minBx, 1)}×)';
+        }
+      }
+      if (maxFee != null) {
+        final fee = g('borrow_fee');
+        if (fee == null || fee > maxFee) {
+          return 'tasa de préstamo ${fee == null ? '–' : _num(fee, 2)} % (> ${n0(maxFee, 2)} %)';
+        }
       }
     }
-    final dv = g('dvol_m');
-    final minDv = long ? _kLongMinDvolM : _kShortMinDvolM;
-    if (dv == null || dv * fx < minDv) {
-      return 'volumen ${dv == null ? '–' : _num(dv * fx, 0)} M\$ (< ${minDv.toInt()})';
+    final minDv = on('dvol');
+    if (minDv != null) {
+      final dv = g('dvol_m');
+      if (dv == null || dv * fx < minDv) {
+        return 'volumen ${dv == null ? '–' : _num(dv * fx, 0)} M\$ (< ${n0(minDv)})';
+      }
     }
-    final ru = g('p_risk_pct');
-    if (ru == null || ru < 60)
-      return 'riesgo usado ${ru == null ? '–' : _num(ru, 0)} % (< 60)';
+    final minRu = on('risk_pct');
+    if (minRu != null) {
+      final ru = g('p_risk_pct');
+      if (ru == null || ru < minRu) {
+        return 'riesgo usado ${ru == null ? '–' : _num(ru, 0)} % (< ${n0(minRu)})';
+      }
+    }
     return null;
+  }
+
+  Future<void> _editRules() async {
+    final m = _mode;
+    final res = await showDialog<Map<String, _Rule>>(
+      context: context,
+      builder: (_) => _themed(_RulesDialog(mode: m, accent: _accent)),
+    );
+    if (res == null || !mounted) return;
+    setState(() {
+      _hard[m] = res;
+      _computePlans();
+    });
+    _save();
+  }
+
+  Widget _rulesCard() {
+    final m = _mode;
+    final active = _kRuleSpecs
+        .where((sp) => (sp.only == null || sp.only == m) && _rule(m, sp.key).on)
+        .toList();
+    final ok = _rows.where((r) => r['swing_ok'] == true).length;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
+      decoration: BoxDecoration(
+        color: _cSurface,
+        border: Border.all(color: _cBorder),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Expanded(
+              child: Text('Filtros duros (swing)',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+            TextButton.icon(
+              style: TextButton.styleFrom(foregroundColor: _accent),
+              onPressed: _editRules,
+              icon: const Icon(Icons.tune, size: 18),
+              label: const Text('Editar'),
+            ),
+          ]),
+          Text(
+              'Pasan $ok de ${_rows.length}. Solo cuentan para la puntuación y el preset Swing.',
+              style: const TextStyle(fontSize: 12, color: _cMuted)),
+          const SizedBox(height: 8),
+          if (active.isEmpty)
+            const Text('Ninguno activo.',
+                style: TextStyle(fontSize: 13, color: _cMuted)),
+          for (final sp in active)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child:
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, right: 8),
+                  child: Container(
+                      width: 5,
+                      height: 5,
+                      decoration: BoxDecoration(
+                          color: _accent, shape: BoxShape.circle)),
+                ),
+                Expanded(
+                    child: Text(_ruleText(m, sp),
+                        style: const TextStyle(fontSize: 13))),
+              ]),
+            ),
+        ],
+      ),
+    );
   }
 
   /// Puntuación 0-100 sobre los valores que pasan los filtros.
@@ -1950,7 +2199,6 @@ class _HomeState extends State<_Home> {
       }
       return true;
     }).toList();
-    _score(out);
     final k = _sortKey[_mode]!;
     final asc = _sortAsc[_mode]!;
     out.sort((a, b) => _cmp(a[k], b[k], asc));
@@ -2076,7 +2324,6 @@ class _HomeState extends State<_Home> {
     final favs = _favs[_mode]!;
     final rows =
         _rows.where((r) => favs.contains(r['ticker']?.toString())).toList();
-    _score(rows);
     rows.sort((a, b) => _cmp(a['score'], b['score'], false));
 
     String sg(dynamic v, {int dec = 1, String suf = ' %'}) {
@@ -2128,7 +2375,7 @@ class _HomeState extends State<_Home> {
         final tgt = _d(r['p_target']);
         b.writeln('Entrada ${nv(e)} · stop ${nv(r['p_stop'])} '
             '(${nv(r['p_stop_pct'], dec: 1)} % · ${nv(r['p_stop_atr'], dec: 1)} ATR) · '
-            '${tgt != null ? 'objetivo${r['p_target_cap'] == true ? ' (2,5 ATR)' : ''} ${nv(tgt)} (${long ? '+' : '−'}${nv(r['p_target_pct'], dec: 1)} %) · '
+            '${tgt != null ? 'objetivo${r['p_target_cap'] == true ? ' (${_capLabel(_mode)})' : ''} ${nv(tgt)} (${long ? '+' : '−'}${nv(r['p_target_pct'], dec: 1)} %) · '
                 'B/R ${nv(r['p_rr'])}' : 'sin objetivo (${long ? 'en máximos' : 'en mínimos'})'}');
         b.writeln(
             'Tamaño ${r['p_shares'] ?? '–'} acc. · ${nv(r['p_amount'], dec: 0)} $cs · '
@@ -2670,6 +2917,8 @@ class _HomeState extends State<_Home> {
               child: const Text('Limpiar filtros'),
             ),
           ),
+        const SizedBox(height: 16),
+        _rulesCard(),
         const SizedBox(height: 20),
         const Divider(color: _cDivider, height: 1),
         const SizedBox(height: 22),
@@ -4025,6 +4274,178 @@ class _ColumnPickerState extends State<_ColumnPicker> {
   }
 }
 
+// ----------------------------------------------------------------- filtros duros
+
+class _RulesDialog extends StatefulWidget {
+  const _RulesDialog({required this.mode, required this.accent});
+  final String mode;
+  final Color accent;
+
+  @override
+  State<_RulesDialog> createState() => _RulesDialogState();
+}
+
+class _RulesDialogState extends State<_RulesDialog> {
+  late Map<String, _Rule> _r;
+  final Map<String, TextEditingController> _c = {};
+  late List<_RuleSpec> _specs;
+
+  @override
+  void initState() {
+    super.initState();
+    _specs = _kRuleSpecs
+        .where((s) => s.only == null || s.only == widget.mode)
+        .toList();
+    _load(_hard[widget.mode] ?? _defaultRules()[widget.mode]!);
+  }
+
+  void _load(Map<String, _Rule> src) {
+    _r = {
+      for (final s in _specs)
+        s.key: (src[s.key] ?? _defaultRules()[widget.mode]![s.key]!).copy()
+    };
+    for (final s in _specs) {
+      (_c[s.key] ??= TextEditingController()).text = _plain(_r[s.key]!.v);
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in _c.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  String? _invalid() {
+    for (final s in _specs.where((s) => s.hasValue)) {
+      final v = _parse(_c[s.key]!.text);
+      if (_r[s.key]!.on && (v == null || v < 0)) return s.label;
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final long = widget.mode == 'long';
+    final bad = _invalid();
+    return AlertDialog(
+      backgroundColor: _cPanel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: _cBorder),
+      ),
+      title: Text(long ? 'Filtros duros · largos' : 'Filtros duros · cortos',
+          style: TextStyle(color: widget.accent, fontWeight: FontWeight.w600)),
+      content: SizedBox(
+        width: math.min(600, size.width - 48),
+        height: math.min(560, size.height - 220),
+        child: ListView.separated(
+          itemCount: _specs.length,
+          separatorBuilder: (_, __) =>
+              const Divider(height: 1, color: _cDivider),
+          itemBuilder: (_, i) {
+            final s = _specs[i];
+            final r = _r[s.key]!;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                children: [
+                  Switch(
+                    value: r.on,
+                    activeColor: widget.accent,
+                    onChanged: (v) => setState(() => r.on = v),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(s.label,
+                            style: TextStyle(
+                                fontSize: 14.5,
+                                color: r.on ? _cText : _cMuted)),
+                        if (s.help != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(s.help!,
+                                style: const TextStyle(
+                                    fontSize: 12, color: _cMuted)),
+                          ),
+                      ],
+                    ),
+                  ),
+                  if (s.hasValue) ...[
+                    const SizedBox(width: 10),
+                    SizedBox(
+                      width: 90,
+                      child: TextField(
+                        controller: _c[s.key],
+                        enabled: r.on,
+                        textAlign: TextAlign.right,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        style: const TextStyle(fontSize: 15),
+                        decoration: const InputDecoration(
+                            isDense: true,
+                            contentPadding: EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 10)),
+                        onChanged: (t) {
+                          final v = _parse(t);
+                          setState(() {
+                            if (v != null && v >= 0) r.v = v;
+                          });
+                        },
+                      ),
+                    ),
+                    SizedBox(
+                      width: 78,
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 8),
+                        child: Text(s.unit,
+                            style:
+                                const TextStyle(fontSize: 13, color: _cMuted)),
+                      ),
+                    ),
+                  ] else
+                    const SizedBox(width: 176),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: _cMuted),
+          onPressed: () => setState(() => _load(_defaultRules()[widget.mode]!)),
+          child: const Text('Valores por defecto'),
+        ),
+        TextButton(
+            style: TextButton.styleFrom(foregroundColor: _cMuted),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancelar')),
+        FilledButton(
+          style: _fillStyle(long ? _kGreenFill : _kRedFill),
+          onPressed: bad != null
+              ? null
+              : () {
+                  final out = Map<String, _Rule>.of(_hard[widget.mode] ?? {});
+                  for (final s in _specs) {
+                    final r = _r[s.key]!;
+                    final v = s.hasValue ? _parse(_c[s.key]!.text) : null;
+                    out[s.key] = _Rule(r.on, v ?? r.v);
+                  }
+                  Navigator.pop(context, out);
+                },
+          child: const Text('Guardar'),
+        ),
+      ],
+    );
+  }
+}
+
 // ----------------------------------------------------------------- enviar favoritos
 
 class _ShareDialog extends StatelessWidget {
@@ -4602,7 +5023,10 @@ class _DetailState extends State<_Detail> {
     if (tgt != null && (_long ? tgt > px : tgt < px)) {
       final run = (tgt - px).abs();
       final rr = run / dist;
-      chips.add(_chip(capped ? 'Objetivo (2,5 ATR)' : 'Objetivo (resistencia)',
+      chips.add(_chip(
+          capped
+              ? 'Objetivo (${_capLabel(_long ? 'long' : 'short')})'
+              : 'Objetivo (resistencia)',
           '${_num(tgt, 2)} $cs (${_long ? '+' : '−'}${_num(run / px * 100, 1)} %)'));
       chips.add(_chip('B/R real', _num(rr, 2),
           color: rr < 1.2 ? _kRed : (rr >= 1.5 ? _kGreen : null)));
@@ -4664,10 +5088,13 @@ class _DetailState extends State<_Detail> {
             '${bf == null ? '–' : '${_num(bf, 2)} % anual'} · '
                 '${bav == null ? '–' : (bav >= 10000000 ? '>10 M acc.' : '${_num(bav, 0)} acc.')}'
                 '${shares > 0 && bav != null ? ' (${_num(bav / shares, 1)}× tu posición)' : ''}',
-            color: (bf != null && bf > _kShortMaxBorrowFee) ||
+            color: (bf != null &&
+                        _ruleOn('short', 'fee') != null &&
+                        bf > _ruleOn('short', 'fee')!) ||
                     (bav != null &&
                         shares > 0 &&
-                        bav / shares < _kShortMinBorrowX)
+                        _ruleOn('short', 'borrow_x') != null &&
+                        bav / shares < _ruleOn('short', 'borrow_x')!)
                 ? _kRed
                 : null));
       }
