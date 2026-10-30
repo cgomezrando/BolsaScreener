@@ -45,7 +45,12 @@ const Color _kAmber = Color(0xFFE0A93B);
 // Cloud Function que lanza el job en modo intradía (botón "Actualizar ahora").
 const String _kRefreshUrl =
     'https://europe-west1-bolsascreener.cloudfunctions.net/screener-refresh';
+// Cloud Function que devuelve precios y técnico al momento de la cartera.
+const String _kQuoteUrl =
+    'https://europe-west1-bolsascreener.cloudfunctions.net/portfolio-quote';
 const Duration _kJobPoll = Duration(seconds: 20);
+// Titular de la cartera de IBKR (solo él ve la pestaña Cartera).
+const String _kPfOwner = 'cgomezrando@gmail.com';
 const Duration _kJobTimeout = Duration(minutes: 20);
 
 ThemeData _darkTheme() {
@@ -176,9 +181,11 @@ const String _cVal = 'Valoración';
 const String _cRes = 'Resultados';
 const String _cAna = 'Analistas';
 const String _cCor = 'Cortos y dividendo';
+const String _cPf = 'Mi cartera (IBKR)';
 
 const List<String> _kCatOrder = [
   _cId,
+  _cPf,
   _cPlan,
   _cEma,
   _cTec,
@@ -321,6 +328,21 @@ List<_Field> _buildFields() {
   n('range20', 'Rango de los últimos 20 cierres %', _cTec,
       h: 'Rango 20 sesiones %');
   b('pinned', 'Precio fijado (posible OPA)', _cTec, w: 90, h: 'Precio fijado');
+  b('in_pf', 'En mi cartera (IBKR)', _cPf, w: 80, h: 'En cartera');
+  ch('pf_side', 'Lado de la posición (largo/corto)', _cPf, w: 70, h: 'Lado');
+  n('pf_qty', 'Acciones en cartera (negativo = corto)', _cPf,
+      dec: 0, s: true, w: 80, h: 'Acc. cartera');
+  n('pf_cost', 'Precio medio de la posición', _cPf, w: 96, h: 'Precio medio');
+  n('pf_pnl', 'P&G latente (al precio del screener)', _cPf,
+      s: true, w: 96, h: 'P&G');
+  n('pf_pnl_pct', 'P&G latente %', _cPf, s: true, w: 70, h: 'P&G %');
+  n('pf_value', 'Valor de la posición (al precio del screener)', _cPf,
+      dec: 0, w: 96, h: 'Valor');
+  ch('cdl', 'Vela de la última sesión', _cTec, w: 96, h: 'Vela');
+  n('wk_lo', 'Mecha inferior de la última vela (% del rango)', _cTec,
+      dec: 0, w: 70, h: 'Mecha inf. %');
+  n('wk_up', 'Mecha superior de la última vela (% del rango)', _cTec,
+      dec: 0, w: 70, h: 'Mecha sup. %');
   n('rsi_w', 'RSI semanal', _cTec, dec: 0, w: 66);
   n('atr_pct', 'ATR % (volatilidad diaria)', _cTec, h: 'ATR %');
   n('vol_rel', 'Volumen relativo (vs media 20)', _cTec, h: 'Volumen relativo');
@@ -560,6 +582,11 @@ const Map<String, String> _kHelp = {
   'borrow_fee':
       'Coste anual de pedir prestadas las acciones en IBKR. Por encima del 1 % se come buena '
           'parte del recorrido de dos semanas.',
+  'cdl':
+      'martillo: mecha inferior ≥ 2× el cuerpo y ≥ 55 % del rango, superior ≤ 30 %. '
+          'estrella (martillo invertido): al revés. Si no, la mecha más larga.',
+  'wk_lo': '% del rango del día (máximo − mínimo) que ocupa la mecha inferior.',
+  'wk_up': '% del rango del día (máximo − mínimo) que ocupa la mecha superior.',
   'pinned':
       'ATR menor del 0,6 % y rango de 20 sesiones menor del 2 %: suele ser una OPA en efectivo.',
   'p_risk_pct':
@@ -864,6 +891,25 @@ const List<_RuleSpec> _kRuleSpecs = [
       hasValue: false,
       help:
           'Largos: precio sobre EMA20 y EMA50, y EMA50 sobre EMA200. Cortos: al revés.'),
+  _RuleSpec('ext20', 'Distancia máxima a la EMA20', 'A ≤ {v} % de la EMA20',
+      unit: '%',
+      dec: 1,
+      help:
+          'Evita entrar estirado. Cuenta la distancia del cierre a la EMA20, por encima o por debajo.'),
+  _RuleSpec('rsi_max', 'RSI diario máximo', 'RSI ≤ {v}', only: 'long'),
+  _RuleSpec('rsi_min', 'RSI diario mínimo', 'RSI ≥ {v}', only: 'short'),
+  _RuleSpec('wick', 'Última vela con la mecha a favor más larga',
+      'Última vela: mecha a favor más larga',
+      hasValue: false,
+      help:
+          'Largos: mecha inferior más larga que la superior (incluye el martillo). '
+          'Cortos: mecha superior más larga que la inferior.'),
+  _RuleSpec('hammer', 'Martillo en la última vela (estricto)',
+      'Última vela: martillo',
+      hasValue: false,
+      help:
+          'Largos: martillo. Cortos: martillo invertido (estrella). Mecha a favor ≥ 2× el cuerpo '
+          'y ≥ 55 % del rango; la contraria ≤ 30 %.'),
   _RuleSpec('earn', 'Resultados a más de', 'Resultados a más de {v} días',
       unit: 'días'),
   _RuleSpec('exdiv', 'Ex-dividendo a más de', 'Sin ex-dividendo en {v} días',
@@ -900,6 +946,10 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'price': _Rule(false, 10),
         'mcap': _Rule(true, 2000),
         'ema': _Rule(true, 0),
+        'ext20': _Rule(true, 2),
+        'rsi_max': _Rule(true, 70),
+        'wick': _Rule(true, 0),
+        'hammer': _Rule(false, 0),
         'earn': _Rule(true, 21),
         'exdiv': _Rule(false, 14),
         'stop_atr': _Rule(true, 1),
@@ -913,6 +963,10 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'price': _Rule(true, 10),
         'mcap': _Rule(true, 5000),
         'ema': _Rule(true, 0),
+        'ext20': _Rule(false, 2),
+        'rsi_min': _Rule(true, 30),
+        'wick': _Rule(false, 0),
+        'hammer': _Rule(true, 0),
         'earn': _Rule(true, 14),
         'exdiv': _Rule(true, 14),
         'stop_atr': _Rule(true, 1),
@@ -939,6 +993,8 @@ double? _ruleOn(String mode, String key) {
 
 String _ruleText(String mode, _RuleSpec sp) {
   final r = _rule(mode, sp.key);
+  if (mode == 'short' && sp.key == 'hammer')
+    return 'Última vela: martillo invertido';
   return sp.text
       .replaceAll('{v}', _num(r.v, r.v == r.v.roundToDouble() ? 0 : sp.dec));
 }
@@ -983,7 +1039,10 @@ const Set<String> _kMoneyKeys = {
   'p_stop',
   'p_target',
   'p_amount',
-  'p_risk'
+  'p_risk',
+  'pf_cost',
+  'pf_pnl',
+  'pf_value'
 };
 
 dynamic _minN(List<dynamic> l) {
@@ -1084,6 +1143,14 @@ Color? _colorFor(_Field f, dynamic v) {
   }
   if (f.key == 'brk_long' && v == true) return _kGreen;
   if (f.key == 'pinned' && v == true) return _kRed;
+  if (f.key == 'pf_side') {
+    if (v == 'largo') return _kGreen;
+    if (v == 'corto') return _kRed;
+  }
+  if (f.key == 'cdl') {
+    if (v == 'martillo') return _kGreen;
+    if (v == 'estrella') return _kRed;
+  }
   if (f.key == 'swing_ok') return v == true ? _kGreen : _kRed;
   if (f.key == 'discard') return _kRed;
   if (f.key == 'brk_short' && v == true) return _kRed;
@@ -1387,6 +1454,38 @@ class _HomeState extends State<_Home> {
   String _snapMode = 'close';
   String _updatedIso = '';
 
+  // Cartera de IBKR (private/portfolio; solo la puede leer el titular)
+  List<Map<String, dynamic>> _pf = [];
+  String _pfAsof = '';
+  bool _pfAllowed = false; // solo el titular ve la pestaña Cartera
+  String? _pfError;
+  DateTime? _pfLive; // hora de los últimos precios al momento
+  bool _pfQuoting = false;
+  final Map<String, Map<String, dynamic>> _pfLiveOut =
+      {}; // valores fuera del screener
+  static const List<String> _kPfDefaultCols = [
+    'ticker',
+    'name',
+    'pf_side',
+    'pf_qty',
+    'pf_cost',
+    'price',
+    'pf_value',
+    'pf_pnl',
+    'pf_pnl_pct',
+    'd_ema20',
+    'trend',
+    'rsi_d',
+    'cdl',
+    'days_to_earn',
+    'days_to_exdiv',
+    'borrow_fee'
+  ];
+  List<String> _pfCols = List<String>.of(_kPfDefaultCols);
+  Map<String, double> _pfColW = {};
+  String _pfSortKey = 'pf_value';
+  bool _pfSortAsc = false;
+
   // Actualización bajo demanda (job en modo intradía)
   bool _jobRunning = false;
   DateTime? _jobStart;
@@ -1479,6 +1578,7 @@ class _HomeState extends State<_Home> {
         'risk': _risk,
         'maxPos': _maxPos,
         'hard': _rulesToJson(),
+        'pfCols': _pfCols,
       };
 
   void _applySettings(Map<String, dynamic> j, {required bool mergeLocal}) {
@@ -1530,6 +1630,11 @@ class _HomeState extends State<_Home> {
       final mp = _d(j['maxPos']);
       if (mp != null && mp > 0) _maxPos = mp;
       if (j['hard'] != null) _rulesFromJson(j['hard']);
+      final pfc = (j['pfCols'] as List?)
+          ?.map((e) => e.toString())
+          .where(_kFieldMap.containsKey)
+          .toList();
+      if (pfc != null && pfc.isNotEmpty) _pfCols = pfc;
     } catch (_) {}
   }
 
@@ -1641,6 +1746,19 @@ class _HomeState extends State<_Home> {
       _maxPos = p.getDouble('scr_maxpos') ?? _maxPos;
       final hs = p.getString('scr_hard');
       if (hs != null) _rulesFromJson(jsonDecode(hs));
+      final pc = p.getStringList('scr_pfcols');
+      if (pc != null && pc.isNotEmpty) {
+        final c = pc.where(_kFieldMap.containsKey).toList();
+        if (c.isNotEmpty) _pfCols = c;
+      }
+      final pw = p.getString('scr_pfw');
+      if (pw != null) {
+        final mw = Map<String, dynamic>.from(jsonDecode(pw) as Map);
+        _pfColW = {
+          for (final e in mw.entries)
+            if (e.value is num) e.key: (e.value as num).toDouble()
+        };
+      }
     } catch (_) {}
   }
 
@@ -1665,6 +1783,8 @@ class _HomeState extends State<_Home> {
       p.setDouble('scr_risk', _risk);
       p.setDouble('scr_maxpos', _maxPos);
       p.setString('scr_hard', jsonEncode(_rulesToJson()));
+      p.setStringList('scr_pfcols', _pfCols);
+      p.setString('scr_pfw', jsonEncode(_pfColW));
     } catch (_) {}
   }
 
@@ -1729,6 +1849,7 @@ class _HomeState extends State<_Home> {
         _updatedIso = (j['updated'] ?? '').toString();
         _loading = false;
       });
+      await _loadPortfolio();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1736,6 +1857,337 @@ class _HomeState extends State<_Home> {
         _loading = false;
       });
     }
+  }
+
+  // ---------------------------------------------------- cartera IBKR
+
+  Future<void> _loadPortfolio() async {
+    List<Map<String, dynamic>> pos = [];
+    String asof = '';
+    final email =
+        (fba.FirebaseAuth.instance.currentUser?.email ?? '').toLowerCase();
+    final allowed = email == _kPfOwner;
+    String? err;
+    if (!allowed) {
+      if (mounted) setState(() => _pfAllowed = false);
+      return;
+    }
+    try {
+      final d = await cf.FirebaseFirestore.instance
+          .collection('private')
+          .doc('portfolio')
+          .get(const cf.GetOptions(source: cf.Source.server));
+      final m = d.data();
+      if (m != null && m['data'] is String) {
+        pos = (jsonDecode(m['data'] as String) as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        asof = (m['asof'] ?? '').toString();
+      }
+    } catch (e) {
+      err = e.toString();
+    }
+    if (!mounted) return;
+    setState(() {
+      _pf = pos;
+      _pfAsof = asof;
+      _pfAllowed = allowed;
+      _pfError = err;
+      _pfLive = null;
+      _pfLiveOut.clear();
+      if (!allowed && _tab == 2) _tab = 0;
+      _applyPortfolio();
+    });
+  }
+
+  void _applyPortfolio() {
+    final byT = <String, Map<String, dynamic>>{};
+    for (final p in _pf) {
+      if (p['in_screener'] == true) byT[p['ticker'].toString()] = p;
+    }
+    for (final r in _rows) {
+      final p = byT[r['ticker']?.toString()];
+      if (p == null) {
+        r['in_pf'] = false;
+        r['pf_side'] = null;
+        r['pf_qty'] =
+            r['pf_cost'] = r['pf_pnl'] = r['pf_pnl_pct'] = r['pf_value'] = null;
+        continue;
+      }
+      final q = _d(p['qty']) ?? 0;
+      final cost = _d(p['cost']);
+      final px = _d(r['price']);
+      r['in_pf'] = true;
+      r['pf_side'] = q < 0 ? 'corto' : 'largo';
+      r['pf_qty'] = q;
+      r['pf_cost'] = cost;
+      r['pf_value'] = px != null ? px * q : _d(p['value']);
+      if (cost != null && cost > 0 && px != null) {
+        r['pf_pnl'] = (px - cost) * q;
+        r['pf_pnl_pct'] = (px / cost - 1) * 100 * (q < 0 ? -1 : 1);
+      } else {
+        r['pf_pnl'] = _d(p['pnl']);
+        r['pf_pnl_pct'] = null;
+      }
+    }
+  }
+
+  String _pfDate() {
+    final a = _pfAsof;
+    if (a.length == 8)
+      return '${a.substring(6)}-${a.substring(4, 6)}-${a.substring(0, 4)}';
+    return a;
+  }
+
+  /// Precios y técnico al momento solo de la cartera (Cloud Function portfolio-quote).
+  Future<void> _quotePortfolio() async {
+    if (_pfQuoting) return;
+    final user = fba.FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    setState(() => _pfQuoting = true);
+    try {
+      final token = await user.getIdToken();
+      final res = await http
+          .post(Uri.parse(_kQuoteUrl),
+              headers: {
+                'Authorization': 'Bearer $token',
+                'Content-Type': 'application/json'
+              },
+              body: '{}')
+          .timeout(const Duration(seconds: 90));
+      Map<String, dynamic> body = {};
+      try {
+        body = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
+      } catch (_) {}
+      if (body['status'] == 'cooldown') {
+        _toast('Espera ${body['wait'] ?? 20} s antes de volver a actualizar');
+      } else if (body['status'] != 'ok') {
+        _toast(
+            'No se pudieron actualizar los precios: ${body['msg'] ?? 'error ${res.statusCode}'}');
+      } else {
+        final live = Map<String, dynamic>.from((body['rows'] as Map?) ?? {});
+        if (!mounted) return;
+        setState(() {
+          final byT = {for (final r in _rows) r['ticker']?.toString(): r};
+          _pfLiveOut.clear();
+          live.forEach((t, v) {
+            final m = Map<String, dynamic>.from(v as Map);
+            final r = byT[t];
+            if (r != null) {
+              r.addAll(m);
+            } else {
+              _pfLiveOut[t] = m;
+            }
+          });
+          _pfLive = DateTime.now();
+          _applyPortfolio();
+          _computePlans();
+        });
+        _toast('Cartera actualizada: ${live.length} valores');
+      }
+    } catch (e) {
+      _toast('No se pudieron actualizar los precios: $e');
+    }
+    if (mounted) setState(() => _pfQuoting = false);
+  }
+
+  /// Filas de la pestaña Cartera: la fila del screener si está, si no una mínima.
+  List<Map<String, dynamic>> _pfRows() {
+    final byT = {for (final r in _rows) r['ticker']?.toString(): r};
+    final out = <Map<String, dynamic>>[];
+    for (final p in _pf) {
+      final r = p['in_screener'] == true ? byT[p['ticker']?.toString()] : null;
+      if (r != null) {
+        out.add(r);
+        continue;
+      }
+      final q = _d(p['qty']) ?? 0;
+      final cost = _d(p['cost']);
+      final tech =
+          p['tech'] is Map ? Map<String, dynamic>.from(p['tech'] as Map) : null;
+      final live = _pfLiveOut[p['ticker']?.toString()];
+      // Precio: al momento > técnico del job (Yahoo) > el del informe de IBKR
+      final mark = _d(live?['price']) ?? _d(tech?['price']) ?? _d(p['mark']);
+      final fresh = live != null || tech != null;
+      out.add({
+        ...?tech,
+        ...?live,
+        'ticker': (tech != null ? p['ticker'] : p['symbol'] ?? '').toString(),
+        'name': ((p['name'] ?? '').toString().isNotEmpty
+                ? p['name']
+                : p['desc'] ?? '')
+            .toString(),
+        'has_logo': p['has_logo'] == true,
+        'currency': p['cur'],
+        'price': mark,
+        'in_pf': true,
+        'pf_side': q < 0 ? 'corto' : 'largo',
+        'pf_qty': q,
+        'pf_cost': cost,
+        'pf_value': fresh && mark != null ? mark * q : _d(p['value']),
+        'pf_pnl': fresh && mark != null && cost != null
+            ? (mark - cost) * q
+            : _d(p['pnl']),
+        'pf_pnl_pct': (cost != null && cost > 0 && mark != null)
+            ? (mark / cost - 1) * 100 * (q < 0 ? -1 : 1)
+            : null,
+        '_outside': true,
+        '_notech': tech == null && live == null,
+      });
+    }
+    out.sort((a, b) => _cmp(a[_pfSortKey], b[_pfSortKey], _pfSortAsc));
+    return out;
+  }
+
+  Widget _portfolioView() {
+    final rows = _pfRows();
+    if (_pf.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Text(
+              _pfError != null
+                  ? 'No se pudo leer la cartera: $_pfError'
+                  : 'Todavía no hay cartera. Se descarga de IBKR en cada ejecución del job.',
+              style: TextStyle(
+                  fontSize: 15, color: _pfError != null ? _kRed : _cMuted)),
+        ),
+      );
+    }
+    // Totales por divisa (valor y P&G al precio del screener)
+    final tot = <String, List<double>>{};
+    for (final r in rows) {
+      final c = _cur(r);
+      final t = tot.putIfAbsent(c, () => [0, 0]);
+      t[0] += (_d(r['pf_value']) ?? 0).abs();
+      t[1] += _d(r['pf_pnl']) ?? 0;
+    }
+    final longs = rows.where((r) => (_d(r['pf_qty']) ?? 0) > 0).length;
+    final cols = <_GridCol>[
+      for (final k in _pfCols)
+        if (_kFieldMap.containsKey(k))
+          _GridCol.forField(_kFieldMap[k]!, width: _pfColW[k])
+    ];
+    const h = TextStyle(fontSize: 19, fontWeight: FontWeight.w600);
+    const sub = TextStyle(fontSize: 13, color: _cMuted);
+    final outside = rows
+        .where((r) => r['_notech'] == true)
+        .map((r) => r['ticker'])
+        .toList();
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 32),
+      children: [
+        Row(children: [
+          Expanded(
+              child: Text('Mi cartera (IBKR) · cierre del ${_pfDate()}',
+                  style: h)),
+          TextButton.icon(
+            style: TextButton.styleFrom(foregroundColor: _cText),
+            icon: const Icon(Icons.view_column_outlined, size: 18),
+            label: const Text('Columnas'),
+            onPressed: _pickPfColumns,
+          ),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            style: _fillStyle(const Color(0xFF2E5FA8)),
+            onPressed: _pfQuoting ? null : _quotePortfolio,
+            icon: _pfQuoting
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.bolt, size: 18),
+            label: Text(_pfQuoting ? 'Actualizando…' : 'Precios al momento'),
+          ),
+        ]),
+        const SizedBox(height: 4),
+        Text(
+            '${rows.length} posiciones ($longs largas, ${rows.length - longs} cortas). '
+            'Las posiciones son las del cierre del último día hábil; el precio, el P&G y el '
+            'técnico, ${_pfLive != null ? 'al momento (${_two(_pfLive!.hour)}:${_two(_pfLive!.minute)}, '
+                'vela de hoy provisional; Europa con ~15 min de retraso)' : 'los del screener (${_asofLabel(lower: true)})'}. '
+            'Toca una fila para ver el detalle.',
+            style: sub),
+        const SizedBox(height: 12),
+        Wrap(spacing: 10, runSpacing: 10, children: [
+          for (final e in tot.entries)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: _cSurface,
+                border: Border.all(color: _cBorder),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text.rich(TextSpan(children: [
+                TextSpan(
+                    text: 'En ${e.key}  ',
+                    style: const TextStyle(color: _cMuted, fontSize: 13)),
+                TextSpan(
+                    text: 'valor ${_num(e.value[0], 0)} ${e.key} · P&G ',
+                    style: const TextStyle(fontSize: 14)),
+                TextSpan(
+                    text:
+                        '${e.value[1] >= 0 ? '+' : ''}${_num(e.value[1], 0)} ${e.key}',
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: e.value[1] >= 0 ? _kGreen : _kRed)),
+              ])),
+            ),
+        ]),
+        const SizedBox(height: 16),
+        _Grid(
+          cols: cols,
+          rows: rows,
+          shrink: true,
+          accent: _accent,
+          sortKey: _pfSortKey,
+          sortAsc: _pfSortAsc,
+          selected: _selected,
+          onSort: (k) => setState(() {
+            if (_pfSortKey == k) {
+              _pfSortAsc = !_pfSortAsc;
+            } else {
+              _pfSortKey = k;
+              final kind = _kFieldMap[k]?.kind;
+              _pfSortAsc = kind == _Kind.text || kind == _Kind.choice;
+            }
+          }),
+          onTap: (r) {
+            if (r['_notech'] == true) {
+              _toast('${r['ticker']}: sin precios de Yahoo, no hay detalle');
+            } else {
+              _openDetail(r);
+            }
+          },
+          onMove: (from, to) {
+            final l = _pfCols;
+            final i = l.indexOf(from);
+            final j = l.indexOf(to);
+            if (i < 0 || j < 0 || i == j) return;
+            setState(() {
+              l.removeAt(i);
+              final j2 = l.indexOf(to);
+              l.insert(i < j ? j2 + 1 : j2, from);
+            });
+            _save();
+          },
+          onResize: (k, w) => setState(() => _pfColW[k] = w.clamp(48.0, 600.0)),
+          onResizeEnd: _save,
+          onResetWidth: (k) {
+            setState(() => _pfColW.remove(k));
+            _save();
+          },
+        ),
+        if (outside.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Text(
+              'Sin precios de Yahoo (solo datos de IBKR): ${outside.join(', ')}',
+              style: sub),
+        ],
+      ],
+    );
   }
 
   // ---------------------------------------------------- actualización bajo demanda
@@ -1979,6 +2431,39 @@ class _HomeState extends State<_Home> {
         if (e20 >= 0) return 'sobre la EMA20';
         if (e50 >= 0) return 'sobre la EMA50';
         if (e5200 >= 0) return 'EMA50 sobre la EMA200';
+      }
+    }
+    final ext = on('ext20');
+    if (ext != null) {
+      final e20 = g('d_ema20');
+      if (e20 == null) return 'sin datos de EMA20';
+      if (e20.abs() > ext) {
+        return 'a ${_num(e20.abs(), 1)} % de la EMA20 (> ${n0(ext, 1)} %)';
+      }
+    }
+    final rsiMax = long ? on('rsi_max') : null;
+    final rsiMin = long ? null : on('rsi_min');
+    if (rsiMax != null || rsiMin != null) {
+      final rs = g('rsi_d');
+      if (rs == null) return 'sin RSI';
+      if (rsiMax != null && rs > rsiMax)
+        return 'RSI ${_num(rs, 0)} (> ${n0(rsiMax)})';
+      if (rsiMin != null && rs < rsiMin)
+        return 'RSI ${_num(rs, 0)} (< ${n0(rsiMin)})';
+    }
+    final wantWick = on('wick') != null;
+    final wantHammer = on('hammer') != null;
+    if (wantWick || wantHammer) {
+      final cdl = r['cdl']?.toString();
+      final lo = g('wk_lo'), up = g('wk_up');
+      if (cdl == null || lo == null || up == null)
+        return 'sin datos de la última vela';
+      if (wantHammer && cdl != (long ? 'martillo' : 'estrella')) {
+        return 'última vela sin ${long ? 'martillo' : 'martillo invertido'} ($cdl)';
+      }
+      if (wantWick && (long ? lo <= up : up <= lo)) {
+        return 'última vela: mecha ${long ? 'inferior' : 'superior'} ${_num(long ? lo : up, 0)} % '
+            '≤ ${long ? 'superior' : 'inferior'} ${_num(long ? up : lo, 0)} %';
       }
     }
     final minDays = on('earn');
@@ -2280,6 +2765,21 @@ class _HomeState extends State<_Home> {
     }
   }
 
+  Future<void> _pickPfColumns() async {
+    final res = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _themed(_ColumnPicker(
+        current: _pfCols,
+        defaults: _kPfDefaultCols,
+        accent: _kGreen,
+      )),
+    );
+    if (res != null && res.isNotEmpty) {
+      setState(() => _pfCols = res);
+      _save();
+    }
+  }
+
   Future<void> _deletePresetDialog(void Function(VoidCallback) set) async {
     final us = _userPresets.where((p) => p.mode == _mode).toList();
     final name = await showDialog<String>(
@@ -2492,18 +2992,31 @@ class _HomeState extends State<_Home> {
           ],
         );
       },
-      trailing: (r) => Tooltip(
-        message: 'Ver gráfico',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => _openTradingView((r['ticker'] ?? '').toString()),
-          child: const Padding(
-            padding: EdgeInsets.only(left: 4),
-            child: Icon(Icons.candlestick_chart_outlined,
-                size: 17, color: _cMuted),
+      trailing: (r) => Row(mainAxisSize: MainAxisSize.min, children: [
+        if (r['in_pf'] == true)
+          Tooltip(
+            message: 'En cartera: ${_num(_d(r['pf_qty']) ?? 0, 0)} acc.'
+                '${r['pf_pnl_pct'] is num ? ' (${(r['pf_pnl_pct'] as num) >= 0 ? '+' : ''}${_num((r['pf_pnl_pct'] as num).toDouble(), 1)} %)' : ''}',
+            child: Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Icon(Icons.work,
+                  size: 15,
+                  color: (_d(r['pf_qty']) ?? 0) < 0 ? _kRed : _kAmber),
+            ),
+          ),
+        Tooltip(
+          message: 'Ver gráfico',
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _openTradingView((r['ticker'] ?? '').toString()),
+            child: const Padding(
+              padding: EdgeInsets.only(left: 4),
+              child: Icon(Icons.candlestick_chart_outlined,
+                  size: 17, color: _cMuted),
+            ),
           ),
         ),
-      ),
+      ]),
     );
   }
 
@@ -2554,6 +3067,8 @@ class _HomeState extends State<_Home> {
       body = _errorView();
     } else if (_tab == 0) {
       body = _screener(wide);
+    } else if (_tab == 2 && _pfAllowed) {
+      body = _portfolioView();
     } else {
       body = _sectorsView();
     }
@@ -2731,6 +3246,7 @@ class _HomeState extends State<_Home> {
       const SizedBox(width: 28),
       _tabBtn(0, 'Screener'),
       _tabBtn(1, 'Sectores e índices'),
+      if (_pfAllowed) _tabBtn(2, 'Cartera'),
     ];
     if (wide) {
       return Container(
@@ -5018,6 +5534,19 @@ class _DetailState extends State<_Detail> {
     final capital = shares * px;
     final realRisk = shares * dist;
     final chips = <Widget>[];
+    if (r['in_pf'] == true) {
+      final q = _d(r['pf_qty']) ?? 0;
+      final pc = _d(r['pf_cost']);
+      final pl = _d(r['pf_pnl']);
+      final pp = _d(r['pf_pnl_pct']);
+      chips.add(_chip(
+          'En cartera',
+          '${q < 0 ? 'corto' : 'largo'} ${_num(q.abs(), 0)} acc.'
+              '${pc != null ? ' a ${_num(pc, 2)} ${_cur(r)}' : ''}'
+              '${pl != null ? ' · P&G ${pl >= 0 ? '+' : ''}${_num(pl, 0)} ${_cur(r)}' : ''}'
+              '${pp != null ? ' (${pp >= 0 ? '+' : ''}${_num(pp, 1)} %)' : ''}',
+          color: pl == null ? _kAmber : (pl >= 0 ? _kGreen : _kRed)));
+    }
     final tgt = _d(r['p_target']) ?? (_long ? _d(r['tgt_l']) : _d(r['tgt_s']));
     final capped = r['p_target_cap'] == true;
     if (tgt != null && (_long ? tgt > px : tgt < px)) {
