@@ -95,15 +95,30 @@ ThemeData _darkTheme() {
 Widget _themed(Widget child) => Theme(data: _darkTheme(), child: child);
 
 Future<void> _openTradingView(String ticker) async {
-  String t;
-  if (ticker.endsWith('.MC')) {
-    t = 'BME:${ticker.substring(0, ticker.length - 3)}';
-  } else if (ticker.endsWith('.DE')) {
-    t = 'XETR:${ticker.substring(0, ticker.length - 3)}';
-  } else if (ticker.endsWith('.PA') || ticker.endsWith('.AS')) {
-    t = 'EURONEXT:${ticker.substring(0, ticker.length - 3)}';
-  } else {
-    t = ticker.replaceAll('-', '.');
+  // Sufijo de Yahoo -> bolsa en TradingView
+  const ex = {
+    '.MC': 'BME',
+    '.DE': 'XETR',
+    '.PA': 'EURONEXT',
+    '.AS': 'EURONEXT',
+    '.BR': 'EURONEXT',
+    '.LS': 'EURONEXT',
+    '.IR': 'EURONEXT',
+    '.MI': 'MIL',
+    '.L': 'LSE',
+    '.SW': 'SIX',
+    '.VI': 'VIE',
+    '.CO': 'OMXCOP',
+    '.ST': 'OMXSTO',
+    '.OL': 'OSL',
+    '.HE': 'OMXHEX',
+  };
+  var t = ticker.replaceAll('-', '.');
+  final dot = ticker.lastIndexOf('.');
+  if (dot > 0) {
+    final sfx = ticker.substring(dot);
+    final x = ex[sfx];
+    if (x != null) t = '$x:${ticker.substring(0, dot)}';
   }
   final uri = Uri.parse('https://www.tradingview.com/chart/?symbol=$t');
   // App nativa (iPad): intenta abrir directamente la app de TradingView;
@@ -2063,9 +2078,36 @@ class _HomeState extends State<_Home> {
       t[1] += _d(r['pf_pnl']) ?? 0;
     }
     final longs = rows.where((r) => (_d(r['pf_qty']) ?? 0) > 0).length;
+    _GridCol pfTicker() {
+      final base =
+          _GridCol.forField(_kFieldMap['ticker']!, width: _pfColW['ticker']);
+      return _GridCol(
+        key: base.key,
+        label: base.label,
+        width: base.width,
+        bold: true,
+        text: base.text,
+        leading: base.leading,
+        trailing: (r) => Tooltip(
+          message: 'Ver gráfico',
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _openTradingView((r['ticker'] ?? '').toString()),
+            child: const Padding(
+              padding: EdgeInsets.only(left: 4),
+              child: Icon(Icons.candlestick_chart_outlined,
+                  size: 17, color: _cMuted),
+            ),
+          ),
+        ),
+      );
+    }
+
     final cols = <_GridCol>[
       for (final k in _pfCols)
-        if (_kFieldMap.containsKey(k))
+        if (k == 'ticker')
+          pfTicker()
+        else if (_kFieldMap.containsKey(k))
           _GridCol.forField(_kFieldMap[k]!, width: _pfColW[k])
     ];
     const h = TextStyle(fontSize: 19, fontWeight: FontWeight.w600);
