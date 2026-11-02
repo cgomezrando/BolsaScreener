@@ -1474,6 +1474,13 @@ class _HomeState extends State<_Home> {
   String _pfAsof = '';
   bool _pfAllowed = false; // solo el titular ve la pestaña Cartera
   String? _pfError;
+  // Lista al momento (screener): valores en pantalla, hasta _kMaxLive
+  static const int _kMaxLive = 200;
+  bool _liveBusy = false;
+  bool _liveAuto = false;
+  DateTime? _liveAt;
+  int _liveCount = 0;
+  Timer? _liveTimer;
   DateTime? _pfLive; // hora de los últimos precios al momento
   bool _pfQuoting = false;
   final Map<String, Map<String, dynamic>> _pfLiveOut =
@@ -1542,6 +1549,7 @@ class _HomeState extends State<_Home> {
 
   @override
   void dispose() {
+    _liveTimer?.cancel();
     _jobPoll?.cancel();
     _jobTick?.cancel();
     if (_syncTimer?.isActive ?? false) {
@@ -1910,6 +1918,7 @@ class _HomeState extends State<_Home> {
       _pfError = err;
       _pfLive = null;
       _pfLiveOut.clear();
+      _liveAt = null;
       if (!allowed && _tab == 2) _tab = 0;
       _applyPortfolio();
     });
@@ -1954,11 +1963,204 @@ class _HomeState extends State<_Home> {
     return a;
   }
 
+  /// Precios y técnico al momento de los valores que se ven en el screener.
+  Future<void> _liveList({bool silent = false}) async {
+    if (_liveBusy || _loading) return;
+    final user = fba.FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final vis = _liveTickers();
+    // La cartera se actualiza siempre junto con las listas (solo el titular)
+    final pfT = _pfAllowed
+        ? _pf.map((p) => p['ticker']?.toString()).whereType<String>().toSet()
+        : <String>{};
+    final stocks = {...vis, ...pfT};
+    if (stocks.isEmpty) return;
+    if (vis.length > _kMaxLive) {
+      if (!silent) {
+        _toast(
+            'Entre Largos y Cortos hay ${vis.length} valores en pantalla. Filtra hasta '
+            '$_kMaxLive en total (p. ej. favoritos o el preset Swing en los dos modos) '
+            'o usa la nube para todo el screener.');
+      }
+      return;
+    }
+    setState(() => _liveBusy = true);
+    try {
+      final token = await user.getIdToken();
+      final res = await http
+          .post(Uri.parse(_kQuoteUrl),
+              headers: {
+                'Authorization': 'Bearer $token',
+                'Content-Type': 'application/json'
+              },
+              body: jsonEncode({
+                'tickers': [...stocks, ..._liveRefs(stocks)]
+              }))
+          .timeout(const Duration(seconds: 90));
+      Map<String, dynamic> body = {};
+      try {
+        body = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
+      } catch (_) {}
+      if (body['status'] == 'ok') {
+        final live = Map<String, dynamic>.from((body['rows'] as Map?) ?? {});
+        if (!mounted) return;
+        var n = 0;
+        setState(() {
+          n = _mergeLive(live, stocks);
+          _liveAt = DateTime.now();
+          _liveCount = n;
+          if (pfT.isNotEmpty) _pfLive = _liveAt;
+        });
+        if (!silent) _toast('Actualizados $n valores (y tu cartera)');
+      } else if (!silent) {
+        _toast(body['status'] == 'cooldown'
+            ? 'Espera ${body['wait'] ?? 15} s antes de volver a actualizar'
+            : 'No se pudo actualizar: ${body['msg'] ?? 'error ${res.statusCode}'}');
+      }
+    } catch (e) {
+      if (!silent) _toast('No se pudo actualizar: $e');
+    }
+    if (mounted) setState(() => _liveBusy = false);
+  }
+
+  /// Índice de referencia de cada valor (como en el job).
+  String _homeIdx(Map<String, dynamic> r) {
+    if (r['currency'] == 'EUR')
+      return r['in_ibex'] == true ? '^IBEX' : '^GDAXI';
+    return 'SPY';
+  }
+
+  /// ETFs de sector/industria e índices que hacen falta para la fuerza relativa y el
+  /// semáforo de mercado de esos valores.
+  Set<String> _liveRefs(Set<String> tickers) {
+    final out = <String>{'SPY', 'QQQ', 'DIA', '^VIX', '^IBEX', '^GDAXI'};
+    final byT = {for (final r in _rows) r['ticker']?.toString(): r};
+    for (final t in tickers) {
+      final r = byT[t];
+      if (r == null) continue;
+      for (final k in ['sec_etf', 'ind_etf']) {
+        final e = r[k];
+        if (e is String && e.isNotEmpty) out.add(e);
+      }
+    }
+    return out;
+  }
+
+  /// Aplica los datos al momento: valores, cartera, fuerza relativa y semáforo.
+  /// Devuelve cuántos valores del screener o de la cartera se han actualizado.
+  int _mergeLive(Map<String, dynamic> live, Set<String> stocks) {
+    final refs = <String, Map<String, dynamic>>{};
+    live.forEach((t, v) => refs[t] = Map<String, dynamic>.from(v as Map));
+    final byT = {for (final r in _rows) r['ticker']?.toString(): r};
+    var n = 0;
+    for (final t in stocks) {
+      final m = refs[t];
+      if (m == null) continue;
+      n++;
+      final r = byT[t];
+      if (r == null) {
+        _pfLiveOut[t] = m; // valor de la cartera fuera del screener
+        continue;
+      }
+      r.addAll(m);
+      // Fuerza relativa con sector, industria e índices también al momento
+      final us = r['currency'] != 'EUR';
+      final sec = r['sec_etf']?.toString();
+      final ind = (r['ind_etf'] ?? r['sec_etf'])?.toString();
+      final rf = <String, Map<String, dynamic>?>{
+        'sec': sec == null ? null : refs[sec],
+        'ind': ind == null ? null : refs[ind],
+        'idx': refs[_homeIdx(r)],
+        'spy': us ? refs['SPY'] : null,
+        'qqq': us ? refs['QQQ'] : null,
+        'dia': us ? refs['DIA'] : null,
+      };
+      rf.forEach((name, ref) {
+        if (ref == null) return;
+        for (final k in _kPeriods.keys) {
+          final a = _d(r['r_$k']), b = _d(ref['r_$k']);
+          if (a != null && b != null) r['rs_${name}_$k'] = a - b;
+        }
+      });
+    }
+    // Semáforo de mercado (mismas reglas que el job; la amplitud sigue la del último dato)
+    final spy = refs['SPY'],
+        vix = refs['^VIX'],
+        ib = refs['^IBEX'],
+        dx = refs['^GDAXI'];
+    if (spy != null && vix != null) {
+      final s20 = _d(spy['d_ema20']),
+          s50 = _d(spy['d_ema50']),
+          v = _d(vix['price']);
+      if (s20 != null && s50 != null && v != null) {
+        final st = (s20 > 0 && v < 20)
+            ? 'verde'
+            : ((s50 < 0 && v > 25) ? 'rojo' : 'ambar');
+        final us = Map<String, dynamic>.from((_regime['us'] as Map?) ?? {});
+        us.addAll({'status': st, 'spy_ema20': s20, 'spy_ema50': s50, 'vix': v});
+        _regime['us'] = us;
+      }
+    }
+    if (ib != null && dx != null) {
+      final i20 = _d(ib['d_ema20']), i50 = _d(ib['d_ema50']);
+      final d20 = _d(dx['d_ema20']), d50 = _d(dx['d_ema50']);
+      if (i20 != null && i50 != null && d20 != null && d50 != null) {
+        final st = (i20 > 0 && d20 > 0)
+            ? 'verde'
+            : ((i50 < 0 && d50 < 0) ? 'rojo' : 'ambar');
+        final eu = Map<String, dynamic>.from((_regime['eu'] as Map?) ?? {});
+        eu.addAll({
+          'status': st,
+          'ibex_ema20': i20,
+          'ibex_ema50': i50,
+          'dax_ema20': d20,
+          'dax_ema50': d50
+        });
+        _regime['eu'] = eu;
+      }
+    }
+    _applyPortfolio();
+    _computePlans();
+    return n;
+  }
+
+  /// Valores en pantalla en Largos y en Cortos (cada modo con sus filtros y su plan).
+  List<String> _liveTickers() {
+    final cur = _mode;
+    final out = <String>{};
+    for (final m in const ['long', 'short']) {
+      _mode = m;
+      _computePlans();
+      out.addAll(
+          _visible().map((r) => r['ticker']?.toString()).whereType<String>());
+    }
+    _mode = cur;
+    _computePlans();
+    return out.toList();
+  }
+
+  void _toggleLiveAuto() {
+    setState(() => _liveAuto = !_liveAuto);
+    _liveTimer?.cancel();
+    _liveTimer = null;
+    if (_liveAuto) {
+      _liveList();
+      _liveTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+        if (mounted && (_tab == 0 || _tab == 2)) _liveList(silent: true);
+      });
+      _toast(
+          'Actualización automática cada 2 minutos (mientras la app esté abierta)');
+    }
+  }
+
   /// Precios y técnico al momento solo de la cartera (Cloud Function portfolio-quote).
   Future<void> _quotePortfolio() async {
     if (_pfQuoting) return;
     final user = fba.FirebaseAuth.instance.currentUser;
     if (user == null) return;
+    final pfT =
+        _pf.map((p) => p['ticker']?.toString()).whereType<String>().toSet();
+    if (pfT.isEmpty) return;
     setState(() => _pfQuoting = true);
     try {
       final token = await user.getIdToken();
@@ -1968,7 +2170,9 @@ class _HomeState extends State<_Home> {
                 'Authorization': 'Bearer $token',
                 'Content-Type': 'application/json'
               },
-              body: '{}')
+              body: jsonEncode({
+                'tickers': [...pfT, ..._liveRefs(pfT)]
+              }))
           .timeout(const Duration(seconds: 90));
       Map<String, dynamic> body = {};
       try {
@@ -1982,23 +2186,12 @@ class _HomeState extends State<_Home> {
       } else {
         final live = Map<String, dynamic>.from((body['rows'] as Map?) ?? {});
         if (!mounted) return;
+        var n = 0;
         setState(() {
-          final byT = {for (final r in _rows) r['ticker']?.toString(): r};
-          _pfLiveOut.clear();
-          live.forEach((t, v) {
-            final m = Map<String, dynamic>.from(v as Map);
-            final r = byT[t];
-            if (r != null) {
-              r.addAll(m);
-            } else {
-              _pfLiveOut[t] = m;
-            }
-          });
+          n = _mergeLive(live, pfT);
           _pfLive = DateTime.now();
-          _applyPortfolio();
-          _computePlans();
         });
-        _toast('Cartera actualizada: ${live.length} valores');
+        _toast('Cartera actualizada: $n valores');
       }
     } catch (e) {
       _toast('No se pudieron actualizar los precios: $e');
@@ -3718,14 +3911,39 @@ class _HomeState extends State<_Home> {
               const SizedBox(width: 16),
               Expanded(
                 child: Text(
-                  onlyFav
-                      ? 'Solo favoritos (los filtros no se aplican)'
-                      : 'Orden: ${_kFieldMap[sk]?.label ?? sk} '
-                          '${_sortAsc[_mode]! ? '↑' : '↓'}',
+                  '${onlyFav ? 'Solo favoritos (los filtros no se aplican)' : 'Orden: ${_kFieldMap[sk]?.label ?? sk} '
+                      '${_sortAsc[_mode]! ? '↑' : '↓'}'}'
+                  '${_liveAt != null ? ' · $_liveCount al momento ${_two(_liveAt!.hour)}:${_two(_liveAt!.minute)}' : ''}',
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 13.5, color: _cMuted),
                 ),
               ),
+              Tooltip(
+                message:
+                    'Precios y técnico al momento de los valores en pantalla en Largos '
+                    'y en Cortos, hasta $_kMaxLive en total (vela de hoy provisional)',
+                child: FilledButton.icon(
+                  style: _fillStyle(const Color(0xFF2E5FA8)),
+                  onPressed: _liveBusy ? null : () => _liveList(),
+                  icon: _liveBusy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.bolt, size: 18),
+                  label: Text(_liveBusy ? 'Actualizando…' : 'Al momento'),
+                ),
+              ),
+              IconButton(
+                tooltip: _liveAuto
+                    ? 'Automático cada 2 min: activado (pulsa para parar)'
+                    : 'Actualizar automáticamente cada 2 min',
+                icon: Icon(Icons.autorenew,
+                    color: _liveAuto ? const Color(0xFF5B8FE0) : _cMuted),
+                onPressed: _toggleLiveAuto,
+              ),
+              const SizedBox(width: 8),
               InkWell(
                 borderRadius: BorderRadius.circular(8),
                 onTap: () {
