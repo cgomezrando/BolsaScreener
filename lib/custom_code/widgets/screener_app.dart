@@ -520,6 +520,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'score',
     'discard',
     'price',
+    'chg_1d',
     'p_entry',
     'p_stop_pct',
     'p_stop_atr',
@@ -542,6 +543,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'score',
     'discard',
     'price',
+    'chg_1d',
     'p_entry',
     'p_stop_pct',
     'p_stop_atr',
@@ -1492,6 +1494,7 @@ class _HomeState extends State<_Home> {
     'pf_qty',
     'pf_cost',
     'price',
+    'chg_1d',
     'pf_value',
     'pf_pnl',
     'pf_pnl_pct',
@@ -1568,6 +1571,8 @@ class _HomeState extends State<_Home> {
       _restore();
     } catch (_) {}
     await _pullSettings();
+    _ensurePfChg();
+    _save();
     _riskCtl.text = _plain(_risk);
     _maxCtl.text = _plain(_maxPos);
     await _load();
@@ -2998,6 +3003,22 @@ class _HomeState extends State<_Home> {
       setState(() => _cols[_mode] = res);
       _save();
     }
+  }
+
+  /// Añade una vez «Día %» junto al precio en Cartera, Largos y Cortos (columnas guardadas de antes).
+  void _ensurePfChg() {
+    final p = _prefs;
+    if (p == null || (p.getBool('scr_chg1d_v2') ?? false)) return;
+    void add(List<String> l) {
+      if (l.contains('chg_1d')) return;
+      final i = l.indexOf('price');
+      l.insert(i < 0 ? l.length : i + 1, 'chg_1d');
+    }
+
+    add(_pfCols);
+    add(_cols['long']!);
+    add(_cols['short']!);
+    p.setBool('scr_chg1d_v2', true);
   }
 
   Future<void> _pickPfColumns() async {
