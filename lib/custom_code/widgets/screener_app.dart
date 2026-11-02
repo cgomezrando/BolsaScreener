@@ -1940,6 +1940,20 @@ class _HomeState extends State<_Home> {
     for (final p in _pf) {
       if (p['in_screener'] == true) byT[p['ticker'].toString()] = p;
     }
+    // Seguridad: solo se enlaza con la fila del screener si la divisa coincide
+    // (p. ej. ASML en Ámsterdam, EUR, no es ASML en el Nasdaq, USD).
+    final rowCur = {
+      for (final r in _rows)
+        r['ticker']?.toString(): (r['currency'] ?? 'USD').toString()
+    };
+    for (final p in List<Map<String, dynamic>>.of(byT.values)) {
+      final c = (p['cur'] ?? '').toString().toUpperCase();
+      final t = p['ticker'].toString();
+      if (c.isNotEmpty && rowCur[t] != null && rowCur[t] != c) {
+        byT.remove(t);
+        p['in_screener'] = false;
+      }
+    }
     for (final r in _rows) {
       final p = byT[r['ticker']?.toString()];
       if (p == null) {
@@ -4092,6 +4106,28 @@ class _HomeState extends State<_Home> {
     );
   }
 
+  // Orden de cada tabla de «Sectores e índices» (clave de columna y sentido)
+  final Map<String, String> _gSortKey = {};
+  final Map<String, bool> _gSortAsc = {};
+
+  void _gSort(String table, String k) {
+    setState(() {
+      if (_gSortKey[table] == k) {
+        _gSortAsc[table] = !(_gSortAsc[table] ?? false);
+      } else {
+        _gSortKey[table] = k;
+        _gSortAsc[table] = k == '_name' || k == '_etf' || k == 'trend';
+      }
+    });
+  }
+
+  List<Map<String, dynamic>> _gSorted(
+      String table, List<Map<String, dynamic>> l) {
+    final k = _gSortKey[table] ?? 'r_3m';
+    final asc = _gSortAsc[table] ?? false;
+    return l..sort((a, b) => _cmp(a[k], b[k], asc));
+  }
+
   Widget _sectorsView() {
     List<Map<String, dynamic>> mk(Map<String, dynamic> src, bool keyIsName) {
       final out = <Map<String, dynamic>>[];
@@ -4106,11 +4142,11 @@ class _HomeState extends State<_Home> {
       return out;
     }
 
-    final secs = mk(_sectors, true);
-    final secsEu =
-        mk(_sectorsEu, true).where((m) => (m['count'] ?? 0) != 0).toList();
-    final inds = mk(_industries, false);
-    final bench = mk(_bench, false);
+    final secs = _gSorted('sec', mk(_sectors, true));
+    final secsEu = _gSorted('seceu',
+        mk(_sectorsEu, true).where((m) => (m['count'] ?? 0) != 0).toList());
+    final inds = _gSorted('ind', mk(_industries, false));
+    final bench = _gSorted('bench', mk(_bench, false));
 
     _GridCol pctCol(String k, String l) => _GridCol(
           key: k,
@@ -4183,7 +4219,15 @@ class _HomeState extends State<_Home> {
       children: [
         const Text('Índices', style: h),
         const SizedBox(height: 10),
-        _Grid(cols: base, rows: bench, shrink: true, accent: _accent),
+        _Grid(
+          cols: base,
+          rows: bench,
+          shrink: true,
+          accent: _accent,
+          sortKey: _gSortKey['bench'] ?? 'r_3m',
+          sortAsc: _gSortAsc['bench'] ?? false,
+          onSort: (k) => _gSort('bench', k),
+        ),
         const SizedBox(height: 30),
         const Text('Sectores EE. UU.', style: h),
         const SizedBox(height: 4),
@@ -4195,6 +4239,9 @@ class _HomeState extends State<_Home> {
           rows: secs,
           shrink: true,
           accent: _accent,
+          sortKey: _gSortKey['sec'] ?? 'r_3m',
+          sortAsc: _gSortAsc['sec'] ?? false,
+          onSort: (k) => _gSort('sec', k),
           onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
               markets: {'EE. UU.'}),
         ),
@@ -4211,6 +4258,9 @@ class _HomeState extends State<_Home> {
           rows: secsEu,
           shrink: true,
           accent: _accent,
+          sortKey: _gSortKey['seceu'] ?? 'r_3m',
+          sortAsc: _gSortAsc['seceu'] ?? false,
+          onSort: (k) => _gSort('seceu', k),
           onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
               markets: {'España', 'Alemania'}),
         ),
@@ -4227,6 +4277,9 @@ class _HomeState extends State<_Home> {
           rows: inds,
           shrink: true,
           accent: _accent,
+          sortKey: _gSortKey['ind'] ?? 'r_3m',
+          sortAsc: _gSortAsc['ind'] ?? false,
+          onSort: (k) => _gSort('ind', k),
           onTap: (m) => _applyGroupFilter('ind_name', m['_name'].toString()),
         ),
       ],
