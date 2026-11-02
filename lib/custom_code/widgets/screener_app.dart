@@ -336,7 +336,12 @@ List<_Field> _buildFields() {
   n('adx', 'ADX (fuerza de la tendencia)', _cTec, dec: 0, w: 60, h: 'ADX');
   n('ema20_run', 'Cierres seguidos sobre (+) o bajo (−) la EMA20', _cTec,
       dec: 0, s: true, w: 76, h: 'Racha EMA20');
-  n('chg_1d', 'Variación de la última sesión %', _cTec, s: true, h: 'Día %');
+  n('chg_today', 'Hoy % (variación de hoy; vacío si aún no hay datos de hoy)',
+      _cTec,
+      s: true, w: 70, h: 'Hoy %');
+  n('chg_1d',
+      'Última sesión % (variación del último cierre frente al anterior)', _cTec,
+      s: true, h: 'Últ. sesión %');
   n('day_high', 'Máximo de la última sesión', _cTec, w: 96, h: 'Máx. sesión');
   n('day_low', 'Mínimo de la última sesión', _cTec, w: 96, h: 'Mín. sesión');
   n('beta', 'Beta', _cTec, w: 60);
@@ -520,7 +525,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'score',
     'discard',
     'price',
-    'chg_1d',
+    'chg_today',
     'p_entry',
     'p_stop_pct',
     'p_stop_atr',
@@ -543,7 +548,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'score',
     'discard',
     'price',
-    'chg_1d',
+    'chg_today',
     'p_entry',
     'p_stop_pct',
     'p_stop_atr',
@@ -1494,7 +1499,7 @@ class _HomeState extends State<_Home> {
     'pf_qty',
     'pf_cost',
     'price',
-    'chg_1d',
+    'chg_today',
     'pf_value',
     'pf_pnl',
     'pf_pnl_pct',
@@ -1859,6 +1864,7 @@ class _HomeState extends State<_Home> {
               ? 'todas suben'
               : (ns.every((x) => x < 0) ? 'todas bajan' : 'mixtas');
         }
+        _markToday(r, _todayIso());
         rows.add(r);
       }
       if (!mounted) return;
@@ -2028,6 +2034,16 @@ class _HomeState extends State<_Home> {
     if (mounted) setState(() => _liveBusy = false);
   }
 
+  static String _todayIso() {
+    final n = DateTime.now();
+    return '${n.year}-${_two(n.month)}-${_two(n.day)}';
+  }
+
+  /// «Hoy %»: la variación del día solo si el dato es de hoy (si no, vacío).
+  static void _markToday(Map<String, dynamic> r, String today) {
+    r['chg_today'] = r['last_date']?.toString() == today ? r['chg_1d'] : null;
+  }
+
   /// Índice de referencia de cada valor (como en el job).
   String _homeIdx(Map<String, dynamic> r) {
     if (r['currency'] == 'EUR')
@@ -2068,6 +2084,7 @@ class _HomeState extends State<_Home> {
         continue;
       }
       r.addAll(m);
+      _markToday(r, _todayIso());
       // Fuerza relativa con sector, industria e índices también al momento
       final us = r['currency'] != 'EUR';
       final sec = r['sec_etf']?.toString();
@@ -2247,6 +2264,7 @@ class _HomeState extends State<_Home> {
         '_outside': true,
         '_notech': tech == null && live == null,
       });
+      _markToday(out.last, _todayIso());
     }
     out.sort((a, b) => _cmp(a[_pfSortKey], b[_pfSortKey], _pfSortAsc));
     return out;
@@ -3008,17 +3026,22 @@ class _HomeState extends State<_Home> {
   /// Añade una vez «Día %» junto al precio en Cartera, Largos y Cortos (columnas guardadas de antes).
   void _ensurePfChg() {
     final p = _prefs;
-    if (p == null || (p.getBool('scr_chg1d_v2') ?? false)) return;
+    if (p == null || (p.getBool('scr_chgtoday_v3') ?? false)) return;
     void add(List<String> l) {
-      if (l.contains('chg_1d')) return;
+      if (l.contains('chg_today')) return;
+      final j = l.indexOf('chg_1d');
+      if (j >= 0) {
+        l[j] = 'chg_today';
+        return;
+      }
       final i = l.indexOf('price');
-      l.insert(i < 0 ? l.length : i + 1, 'chg_1d');
+      l.insert(i < 0 ? l.length : i + 1, 'chg_today');
     }
 
     add(_pfCols);
     add(_cols['long']!);
     add(_cols['short']!);
-    p.setBool('scr_chg1d_v2', true);
+    p.setBool('scr_chgtoday_v3', true);
   }
 
   Future<void> _pickPfColumns() async {
@@ -4574,6 +4597,7 @@ class _FieldPickerState extends State<_FieldPicker> {
             f.key != 'score' &&
             (_q.isEmpty ||
                 f.label.toLowerCase().contains(_q) ||
+                f.header.toLowerCase().contains(_q) ||
                 f.cat.toLowerCase().contains(_q)))
         .toList();
     final items = <Widget>[];
@@ -4946,6 +4970,7 @@ class _ColumnPickerState extends State<_ColumnPicker> {
             !_sel.contains(f.key) &&
             (_q.isEmpty ||
                 f.label.toLowerCase().contains(_q) ||
+                f.header.toLowerCase().contains(_q) ||
                 f.cat.toLowerCase().contains(_q)))
         .toList();
     final items = <Widget>[];
