@@ -10,6 +10,7 @@ import 'package:flutter/material.dart' hide RepeatMode;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
@@ -41,6 +42,7 @@ const Color _kRed = Color(0xFFE5534B);
 const Color _kRedFill = Color(0xFFB33A34);
 const Color _kStar = Color(0xFFF5C451);
 const Color _kAmber = Color(0xFFE0A93B);
+const Color _kEdit = Color(0xFF5B9BFF); // valores editables (entrada y stop)
 
 // Cloud Function que lanza el job en modo intradía (botón "Actualizar ahora").
 const String _kRefreshUrl =
@@ -48,6 +50,9 @@ const String _kRefreshUrl =
 // Cloud Function que devuelve precios y técnico al momento de la cartera.
 const String _kQuoteUrl =
     'https://europe-west1-bolsascreener.cloudfunctions.net/portfolio-quote';
+// Cloud Function con la ficha de la empresa (descripción, resultados, analistas).
+const String _kDetailUrl =
+    'https://europe-west1-bolsascreener.cloudfunctions.net/screener-detail';
 const Duration _kJobPoll = Duration(seconds: 20);
 // Titular de la cartera de IBKR (solo él ve la pestaña Cartera).
 const String _kPfOwner = 'cgomezrando@gmail.com';
@@ -133,6 +138,156 @@ Future<void> _openTradingView(String ticker) async {
   await launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
+// ----------------------------------------------------------------- cajas alineadas
+
+/// Reparte las cajas en filas; todas las de una fila con la misma altura (la mayor).
+Widget _equalRows(List<Widget> tiles, {double minW = 190, double gap = 8}) {
+  return LayoutBuilder(builder: (context, c) {
+    final n = math.max(1, ((c.maxWidth + gap) / (minW + gap)).floor());
+    final rows = <Widget>[];
+    for (var i = 0; i < tiles.length; i += n) {
+      final cells = <Widget>[];
+      for (var j = 0; j < n; j++) {
+        if (j > 0) cells.add(SizedBox(width: gap));
+        cells.add(Expanded(
+            child: i + j < tiles.length ? tiles[i + j] : const SizedBox()));
+      }
+      if (rows.isNotEmpty) rows.add(SizedBox(height: gap));
+      rows.add(IntrinsicHeight(
+        child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch, children: cells),
+      ));
+    }
+    return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch, children: rows);
+  });
+}
+
+String _fmtBig(double? v) {
+  if (v == null) return '–';
+  final a = v.abs();
+  if (a >= 1e9) return '${_num(v / 1e9, 2)} mil M';
+  if (a >= 1e6) return '${_num(v / 1e6, 0)} M';
+  return _num(v, 0);
+}
+
+const Map<String, String> _kGradeEs = {
+  'Strong Buy': 'Compra fuerte',
+  'Buy': 'Compra',
+  'Outperform': 'Mejor que el mercado',
+  'Market Outperform': 'Mejor que el mercado',
+  'Sector Outperform': 'Mejor que el sector',
+  'Overweight': 'Sobreponderar',
+  'Positive': 'Positiva',
+  'Accumulate': 'Acumular',
+  'Hold': 'Mantener',
+  'Neutral': 'Neutral',
+  'Equal-Weight': 'Peso neutral',
+  'Equal Weight': 'Peso neutral',
+  'Market Perform': 'En línea con el mercado',
+  'Sector Perform': 'En línea con el sector',
+  'Peer Perform': 'En línea con su sector',
+  'In-Line': 'En línea',
+  'Sector Weight': 'Peso del sector',
+  'Underperform': 'Peor que el mercado',
+  'Sector Underperform': 'Peor que el sector',
+  'Underweight': 'Infraponderar',
+  'Reduce': 'Reducir',
+  'Negative': 'Negativa',
+  'Sell': 'Venta',
+  'Strong Sell': 'Venta fuerte',
+};
+const Map<String, String> _kActionEs = {
+  'up': 'Mejora',
+  'down': 'Rebaja',
+  'main': 'Mantiene',
+  'init': 'Inicia',
+  'reit': 'Reitera',
+};
+const Map<String, String> _kRecEs = {
+  'strong_buy': 'Compra fuerte',
+  'buy': 'Compra',
+  'hold': 'Mantener',
+  'underperform': 'Peor que el mercado',
+  'sell': 'Venta',
+  'strong_sell': 'Venta fuerte',
+};
+
+/// Gráfico de resultados al estilo Investing: ingresos (azul), BPA (gris) y previsión (naranja).
+class _EarnChart extends CustomPainter {
+  _EarnChart(this.q);
+  final List<Map<String, dynamic>> q;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (q.isEmpty) return;
+    const bottom = 22.0;
+    final h = size.height - bottom;
+    final slot = size.width / q.length;
+    double maxOf(Iterable<double?> it) =>
+        it.whereType<double>().fold<double>(0, (m, v) => math.max(m, v.abs()));
+    final revMax = maxOf(
+        [...q.map((e) => _d(e['rev'])), ...q.map((e) => _d(e['rev_est']))]);
+    final epsMax = maxOf(
+        [...q.map((e) => _d(e['eps'])), ...q.map((e) => _d(e['eps_est']))]);
+    final grid = Paint()
+      ..color = _cDivider
+      ..strokeWidth = 1;
+    for (var g = 0; g <= 4; g++) {
+      final y = h - h * g / 4;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
+    }
+    for (var i = 0; i < q.length; i++) {
+      final e = q[i];
+      final x0 = slot * i;
+      final bw = slot * 0.26;
+      final rev = _d(e['rev']);
+      if (rev != null && revMax > 0) {
+        final bh = h * rev.abs() / revMax * 0.92;
+        canvas.drawRect(Rect.fromLTWH(x0 + slot * 0.2, h - bh, bw, bh),
+            Paint()..color = const Color(0xFF1F4E9C));
+      }
+      final rest = _d(e['rev_est']);
+      if (rest != null && revMax > 0) {
+        final y = h - h * rest.abs() / revMax * 0.92;
+        canvas.drawLine(
+            Offset(x0 + slot * 0.2 - 2, y),
+            Offset(x0 + slot * 0.2 + bw + 2, y),
+            Paint()
+              ..color = _kAmber
+              ..strokeWidth = 3);
+      }
+      final eps = _d(e['eps']);
+      final xe = x0 + slot * 0.54;
+      if (eps != null && epsMax > 0) {
+        final bh = h * eps.abs() / epsMax * 0.92;
+        canvas.drawRect(Rect.fromLTWH(xe, h - bh, bw, bh),
+            Paint()..color = eps < 0 ? _kRedFill : const Color(0xFF4A4F57));
+      }
+      final est = _d(e['eps_est']);
+      if (est != null && epsMax > 0) {
+        final y = h - h * est.abs() / epsMax * 0.92;
+        canvas.drawLine(
+            Offset(xe - 2, y),
+            Offset(xe + bw + 2, y),
+            Paint()
+              ..color = _kAmber
+              ..strokeWidth = 3);
+      }
+      final tp = TextPainter(
+        text: TextSpan(
+            text: (e['quarter'] ?? e['date'] ?? '').toString(),
+            style: const TextStyle(fontSize: 11, color: _cMuted)),
+        textDirection: ui.TextDirection.ltr,
+      )..layout(maxWidth: slot);
+      tp.paint(canvas, Offset(x0 + (slot - tp.width) / 2, h + 6));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _EarnChart old) => old.q != q;
+}
+
 // ----------------------------------------------------------------- logos
 
 const String _kLogoBase = 'https://storage.googleapis.com/bolsascreener-logos/';
@@ -191,7 +346,7 @@ const String _cEma = 'Medias (EMA)';
 const String _cTec = 'Técnico';
 const String _cRet = 'Rentabilidad';
 const String _cRel = 'Fuerza relativa (puntos %)';
-const String _cPat = 'Patrones de vela';
+const String _cPat = 'Patrones y figuras';
 const String _cVal = 'Valoración';
 const String _cRes = 'Resultados';
 const String _cAna = 'Analistas';
@@ -345,6 +500,10 @@ List<_Field> _buildFields() {
   n('day_high', 'Máximo de la última sesión', _cTec, w: 96, h: 'Máx. sesión');
   n('day_low', 'Mínimo de la última sesión', _cTec, w: 96, h: 'Mín. sesión');
   n('beta', 'Beta', _cTec, w: 60);
+  n('beta_sec', 'Beta del sector (mediana de sus empresas)', _cTec,
+      w: 70, h: 'Beta sector');
+  n('beta_ind', 'Beta de la industria (mediana de sus empresas)', _cTec,
+      w: 70, h: 'Beta industria');
   n('range20', 'Rango de los últimos 20 cierres %', _cTec,
       h: 'Rango 20 sesiones %');
   b('pinned', 'Precio fijado (posible OPA)', _cTec, w: 90, h: 'Precio fijado');
@@ -420,6 +579,9 @@ List<_Field> _buildFields() {
         (k, l) => n('rs_${ref}_$k', 'vs $rl $l', _cRel, s: true, w: 82));
   });
 
+  ch('struct', 'Estructura de máximos y mínimos (últimos 6 meses)', _cPat,
+      w: 150, h: 'Estructura');
+  ch('figure', 'Figura: doble suelo / doble techo', _cPat, w: 150, h: 'Figura');
   n('hb_2050', 'Martillo alcista en EMA20 o EMA50 (sesiones)', _cPat,
       dec: 0, h: 'Martillo alcista');
   n('hb_any', 'Martillo alcista en cualquier EMA (sesiones)', _cPat,
@@ -573,6 +735,22 @@ const Map<String, List<String>> _kDefaultCols = {
 };
 
 const Map<String, String> _kHelp = {
+  'short_float':
+      '% de las acciones en libre circulación que están vendidas a crédito (prestadas y '
+          'vendidas por quien apuesta a la baja). Lo publica FINRA dos veces al mes. Por encima del 10 % '
+          'hay mucho posicionamiento bajista: más riesgo de subidas bruscas por cierre de cortos.',
+  'struct':
+      'Compara los dos últimos máximos y mínimos relevantes (pivotes de 5 velas) de 6 meses. '
+          'Crecientes = tendencia alcista sana; decrecientes = bajista; compresión = triángulo.',
+  'figure':
+      'Dos mínimos (o máximos) parecidos, separados al menos 8 sesiones, con un rebote de 2 ATR '
+          'entre ellos. Confirmado = el precio ya ha superado (perforado) el máximo (mínimo) intermedio.',
+  'beta_sec':
+      'Mediana de la beta de las empresas del screener en ese sector. 1 = se mueve como el '
+          'mercado; 1,5 = un 50 % más.',
+  'beta_ind':
+      'Mediana de la beta de las empresas del screener en esa industria (o del sector si no '
+          'hay industria con ETF).',
   'hb_2050':
       'Sesiones desde la vela (0 = hoy). Máximo 3 = en las últimas 4 velas.',
   'hb_any':
@@ -1169,6 +1347,12 @@ Color? _colorFor(_Field f, dynamic v) {
     if (v == 'largo') return _kGreen;
     if (v == 'corto') return _kRed;
   }
+  if (f.key == 'struct') {
+    if (v.toString().startsWith('máx. y mín. crec')) return _kGreen;
+    if (v.toString().startsWith('máx. y mín. decrec')) return _kRed;
+  }
+  if (f.key == 'figure')
+    return v.toString().startsWith('doble suelo') ? _kGreen : _kRed;
   if (f.key == 'cdl') {
     if (v == 'martillo') return _kGreen;
     if (v == 'estrella') return _kRed;
@@ -1471,6 +1655,7 @@ class _HomeState extends State<_Home> {
   Map<String, dynamic> _sectorsEu = {};
   double? _fx;
   Map<String, dynamic> _regime = {};
+  List<Map<String, dynamic>> _macro = [];
   bool _showRed = false;
   String _asof = '';
   String _snapMode = 'close';
@@ -1877,6 +2062,10 @@ class _HomeState extends State<_Home> {
         _sectorsEu = Map<String, dynamic>.from((j['sectors_eu'] as Map?) ?? {});
         _fx = _d(((j['fx'] as Map?) ?? {})['EURUSD']);
         _regime = Map<String, dynamic>.from((j['regime'] as Map?) ?? {});
+        _macro = ((j['macro'] as List?) ?? [])
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        _applyGroupBetas();
         _computePlans();
         _asof = (j['asof'] ?? '').toString();
         _snapMode = (j['mode'] ?? 'close').toString();
@@ -1890,6 +2079,17 @@ class _HomeState extends State<_Home> {
         _error = e.toString();
         _loading = false;
       });
+    }
+  }
+
+  /// Beta del sector y de la industria (mediana de sus empresas, calculada en el job).
+  void _applyGroupBetas() {
+    for (final r in _rows) {
+      final secs = r['currency'] == 'EUR' ? _sectorsEu : _sectors;
+      final s = secs[r['sector']] as Map?;
+      final i = r['ind_etf'] != null ? _industries[r['ind_etf']] as Map? : null;
+      r['beta_sec'] = _d(s?['beta_med']);
+      r['beta_ind'] = _d(i?['beta_med']) ?? r['beta_sec'];
     }
   }
 
@@ -4122,11 +4322,87 @@ class _HomeState extends State<_Home> {
   }
 
   List<Map<String, dynamic>> _gSorted(
-      String table, List<Map<String, dynamic>> l) {
-    final k = _gSortKey[table] ?? 'r_3m';
+      String table, List<Map<String, dynamic>> l,
+      {String def = 'r_3m'}) {
+    final k = _gSortKey[table] ?? def;
+    if (k.isEmpty) return l; // sin orden: el del job
     final asc = _gSortAsc[table] ?? false;
     return l..sort((a, b) => _cmp(a[k], b[k], asc));
   }
+
+  Widget _macroGrid() {
+    _GridCol chgCol(String k, String l) => _GridCol(
+          key: k,
+          label: l,
+          width: 84,
+          right: true,
+          text: (r) {
+            final d = _d(r[k]);
+            if (d == null) return '–';
+            final y = r['kind'] == 'yield';
+            return '${d > 0 ? '+' : ''}${_num(d, y ? 0 : 1)}${y ? ' pb' : ''}';
+          },
+          color: (r) {
+            final d = _d(r[k]);
+            if (d == null || d == 0) return null;
+            return d > 0 ? _kGreen : _kRed;
+          },
+        );
+    final cols = <_GridCol>[
+      _GridCol(
+          key: 'name',
+          label: 'Mercado',
+          width: 300,
+          bold: true,
+          text: (r) => r['name'].toString()),
+      _GridCol(
+          key: 'price',
+          label: 'Último',
+          width: 100,
+          right: true,
+          text: (r) {
+            final d = _d(r['price']);
+            if (d == null) return '–';
+            return r['kind'] == 'yield'
+                ? '${_num(d, 3)} %'
+                : _num(d, r['sym'] == 'EURUSD=X' ? 4 : 2);
+          }),
+      chgCol('1d', 'Día'),
+      chgCol('1w', '1 semana'),
+      chgCol('1m', '1 mes'),
+      chgCol('3m', '3 meses'),
+      chgCol('ytd', 'En el año'),
+      chgCol('1y', '1 año'),
+    ];
+    final rows =
+        _gSorted('macro', List<Map<String, dynamic>>.of(_macro), def: '');
+    return _Grid(
+      cols: cols,
+      rows: rows,
+      shrink: true,
+      accent: _accent,
+      sortKey: _gSortKey['macro'],
+      sortAsc: _gSortAsc['macro'] ?? false,
+      onSort: (k) => _gSort('macro', k),
+      onTap: (r) => _openTradingView(_tvMacro[r['sym']] ?? r['sym'].toString()),
+    );
+  }
+
+  static const Map<String, String> _tvMacro = {
+    '^GSPC': 'SP:SPX',
+    '^VIX': 'CBOE:VIX',
+    '^IRX': 'TVC:US03MY',
+    '2YY=F': 'TVC:US02Y',
+    '^FVX': 'TVC:US05Y',
+    '^TNX': 'TVC:US10Y',
+    '^TYX': 'TVC:US30Y',
+    'GC=F': 'COMEX:GC1!',
+    'HRC=F': 'COMEX:HRC1!',
+    'NG=F': 'NYMEX:NG1!',
+    'BZ=F': 'ICEEUR:BRN1!',
+    'DX-Y.NYB': 'TVC:DXY',
+    'EURUSD=X': 'FX:EURUSD',
+  };
 
   Widget _sectorsView() {
     List<Map<String, dynamic>> mk(Map<String, dynamic> src, bool keyIsName) {
@@ -4217,6 +4493,17 @@ class _HomeState extends State<_Home> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 32),
       children: [
+        if (_macro.isNotEmpty) ...[
+          const Text('Mercados y macro', style: h),
+          const SizedBox(height: 4),
+          const Text(
+              'Bonos: rentabilidad en % y variaciones en puntos básicos (pb). Resto: variaciones en %. '
+              'El bono a 1 año no está en Yahoo: se muestran el de 3 meses y el de 2 años (futuro).',
+              style: sub),
+          const SizedBox(height: 10),
+          _macroGrid(),
+          const SizedBox(height: 30),
+        ],
         const Text('Índices', style: h),
         const SizedBox(height: 10),
         _Grid(
@@ -5501,8 +5788,374 @@ class _DetailState extends State<_Detail> {
   late final TextEditingController _stop;
   late final TextEditingController _entry;
   late final String _stopSrc;
+  Map<String, dynamic>? _info; // ficha: descripción, resultados, analistas
+  String? _infoErr;
+  bool _infoLoading = true;
 
   bool get _long => widget.mode == 'long';
+
+  Future<void> _loadInfo() async {
+    final user = fba.FirebaseAuth.instance.currentUser;
+    final t = (widget.row['ticker'] ?? '').toString();
+    if (user == null || t.isEmpty) return;
+    try {
+      final token = await user.getIdToken();
+      final res = await http
+          .post(Uri.parse(_kDetailUrl),
+              headers: {
+                'Authorization': 'Bearer $token',
+                'Content-Type': 'application/json'
+              },
+              body: jsonEncode({'ticker': t}))
+          .timeout(const Duration(seconds: 60));
+      final body = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
+      if (!mounted) return;
+      setState(() {
+        _infoLoading = false;
+        if (body['status'] == 'ok') {
+          _info = body;
+        } else {
+          _infoErr = (body['msg'] ?? 'error ${res.statusCode}').toString();
+        }
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _infoLoading = false;
+          _infoErr = e.toString();
+        });
+      }
+    }
+  }
+
+  Widget _secTitle(String t) => Padding(
+        padding: const EdgeInsets.only(top: 24, bottom: 10),
+        child: Text(t,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+      );
+
+  List<Widget> _infoSections() {
+    if (_infoLoading) {
+      return [
+        const Padding(
+          padding: EdgeInsets.only(top: 18),
+          child: Row(children: [
+            SizedBox(
+                width: 14,
+                height: 14,
+                child:
+                    CircularProgressIndicator(strokeWidth: 2, color: _cMuted)),
+            SizedBox(width: 10),
+            Text('Cargando descripción, resultados y analistas…',
+                style: TextStyle(fontSize: 13, color: _cMuted)),
+          ]),
+        ),
+      ];
+    }
+    final i = _info;
+    if (i == null) {
+      return [
+        Padding(
+          padding: const EdgeInsets.only(top: 18),
+          child: Text(
+              'No se pudo cargar la ficha de la empresa: ${_infoErr ?? ''}',
+              style: const TextStyle(fontSize: 13, color: _cMuted)),
+        ),
+      ];
+    }
+    final out = <Widget>[];
+    final cs = _cur(widget.row);
+    // ---- Descripción
+    final desc = (i['desc'] ?? '').toString();
+    if (desc.isNotEmpty) {
+      final facts = [
+        if (i['industry'] != null) i['industry'],
+        if (i['country'] != null) i['country'],
+        if (i['employees'] is num)
+          '${_num((i['employees'] as num).toDouble(), 0)} empleados',
+      ].join(' · ');
+      out.add(_secTitle('Qué hace la empresa'));
+      out.add(Text(desc, style: const TextStyle(fontSize: 14, height: 1.45)));
+      if (facts.isNotEmpty) {
+        out.add(Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(facts,
+              style: const TextStyle(fontSize: 12.5, color: _cMuted)),
+        ));
+      }
+      if (i['desc_lang'] == 'en') {
+        out.add(const Padding(
+          padding: EdgeInsets.only(top: 4),
+          child: Text(
+              '(Sin traducción disponible: texto original de Yahoo en inglés.)',
+              style: TextStyle(fontSize: 11.5, color: _cMuted)),
+        ));
+      }
+    }
+    // ---- Resultados (como Investing)
+    final q = ((i['earnings'] as List?) ?? [])
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    final nxt =
+        i['next'] is Map ? Map<String, dynamic>.from(i['next'] as Map) : null;
+    if (q.isNotEmpty || nxt != null) {
+      out.add(_secTitle('Resultados'));
+      if (q.isNotEmpty) {
+        final last = q.last;
+        Widget big(String v, String l, {Color? c}) => Expanded(
+              child: Column(children: [
+                Text(v,
+                    style: TextStyle(
+                        fontSize: 22, fontWeight: FontWeight.w600, color: c)),
+                const SizedBox(height: 2),
+                Text(l, style: const TextStyle(fontSize: 12.5, color: _cMuted)),
+              ]),
+            );
+        final le = _d(last['eps']), lest = _d(last['eps_est']);
+        out.add(Row(children: [
+          big(_fmtDate(last['date'].toString()), 'Último anuncio'),
+          big(le == null ? '–' : _num(le, 2), 'BPA',
+              c: le != null && lest != null
+                  ? (le >= lest ? _kGreen : _kRed)
+                  : null),
+          big(_fmtBig(_d(last['rev'])), 'Ingresos'),
+        ]));
+        out.add(const SizedBox(height: 14));
+        out.add(const Row(children: [
+          Icon(Icons.square, size: 12, color: Color(0xFF1F4E9C)),
+          Text(' Ingresos   ', style: TextStyle(fontSize: 12, color: _cMuted)),
+          Icon(Icons.square, size: 12, color: Color(0xFF4A4F57)),
+          Text(' BPA   ', style: TextStyle(fontSize: 12, color: _cMuted)),
+          Icon(Icons.horizontal_rule, size: 16, color: _kAmber),
+          Text(' Previsión', style: TextStyle(fontSize: 12, color: _cMuted)),
+        ]));
+        out.add(const SizedBox(height: 8));
+        out.add(SizedBox(
+            height: 170,
+            child: CustomPaint(painter: _EarnChart(q), size: Size.infinite)));
+      }
+      const hs = TextStyle(fontSize: 12.5, color: _cMuted);
+      Widget row(String date, String? quarter, double? eps, double? est,
+          double? rev, double? revEst,
+          {bool next = false}) {
+        Color? c(double? a, double? e) =>
+            (a == null || e == null) ? null : (a >= e ? _kGreen : _kRed);
+        return Container(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: _cDivider))),
+          child: Row(children: [
+            Expanded(
+              flex: 3,
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(next ? 'Próximo: ${_fmtDate(date)}' : _fmtDate(date),
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: next ? _kAmber : null)),
+                    if (quarter != null) Text('Trimestre $quarter', style: hs),
+                  ]),
+            ),
+            const Expanded(
+              flex: 2,
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('BPA:', style: hs),
+                    Text('Ingresos:', style: hs),
+                  ]),
+            ),
+            Expanded(
+              flex: 3,
+              child:
+                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Text(eps == null ? '–' : _num(eps, 2),
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: c(eps, est))),
+                Text(_fmtBig(rev),
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: c(rev, revEst))),
+              ]),
+            ),
+            Expanded(
+              flex: 3,
+              child:
+                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Text(est == null ? '–' : _num(est, 2),
+                    style: const TextStyle(fontSize: 14)),
+                Text(_fmtBig(revEst), style: const TextStyle(fontSize: 14)),
+              ]),
+            ),
+          ]),
+        );
+      }
+
+      out.add(const SizedBox(height: 10));
+      out.add(const Row(children: [
+        Expanded(flex: 3, child: Text('Fecha de publicación', style: hs)),
+        Expanded(flex: 2, child: SizedBox()),
+        Expanded(
+            flex: 3,
+            child: Text('Real', textAlign: TextAlign.right, style: hs)),
+        Expanded(
+            flex: 3,
+            child: Text('Previsión', textAlign: TextAlign.right, style: hs)),
+      ]));
+      if (nxt != null) {
+        out.add(row(nxt['date'].toString(), nxt['quarter']?.toString(), null,
+            _d(nxt['eps_est']), null, _d(nxt['rev_est']),
+            next: true));
+      }
+      for (final e in q.reversed) {
+        out.add(row(e['date'].toString(), e['quarter']?.toString(),
+            _d(e['eps']), _d(e['eps_est']), _d(e['rev']), _d(e['rev_est'])));
+      }
+      out.add(Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(
+            q.any((e) => e['rev_est'] != null)
+                ? 'Verde/rojo: real por encima/por debajo de la previsión. Previsiones de ingresos: Alpha Vantage.'
+                : 'Sin previsión de ingresos de trimestres pasados para este valor (Alpha Vantage no la tiene '
+                    'o se ha agotado el cupo diario gratuito).',
+            style: const TextStyle(fontSize: 11.5, color: _cMuted)),
+      ));
+    }
+    // ---- Analistas
+    final a = i['analysts'] is Map
+        ? Map<String, dynamic>.from(i['analysts'] as Map)
+        : null;
+    if (a != null) {
+      final acts = ((a['actions'] as List?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      final sm = a['summary'] is Map
+          ? Map<String, dynamic>.from(a['summary'] as Map)
+          : null;
+      final tm = _d(a['target_mean']);
+      if (acts.isNotEmpty || sm != null || tm != null) {
+        out.add(_secTitle('Analistas'));
+        final px = _d(widget.row['price']);
+        final parts = <String>[
+          if (a['key'] != null && _kRecEs[a['key']] != null)
+            'Consenso: ${_kRecEs[a['key']]}',
+          if (a['n'] is num) '${(a['n'] as num).toInt()} analistas',
+          if (tm != null)
+            'objetivo medio ${_num(tm, 2)} $cs'
+                '${px != null && px > 0 ? ' (${tm >= px ? '+' : ''}${_num((tm / px - 1) * 100, 1)} %)' : ''}',
+          if (_d(a['target_low']) != null && _d(a['target_high']) != null)
+            'rango ${_num(_d(a['target_low'])!, 2)}–${_num(_d(a['target_high'])!, 2)} $cs',
+        ];
+        out.add(Text(parts.join(' · '), style: const TextStyle(fontSize: 14)));
+        if (sm != null) {
+          const keys = ['strongBuy', 'buy', 'hold', 'sell', 'strongSell'];
+          const names = [
+            'Compra fuerte',
+            'Compra',
+            'Mantener',
+            'Venta',
+            'Venta fuerte'
+          ];
+          const colors = [
+            Color(0xFF1B8A4C),
+            _kGreen,
+            _kAmber,
+            _kRed,
+            _kRedFill
+          ];
+          final tot =
+              keys.fold<int>(0, (s, k) => s + ((sm[k] as num?)?.toInt() ?? 0));
+          if (tot > 0) {
+            out.add(const SizedBox(height: 10));
+            out.add(ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: Row(children: [
+                for (var k = 0; k < 5; k++)
+                  if (((sm[keys[k]] as num?)?.toInt() ?? 0) > 0)
+                    Expanded(
+                      flex: (sm[keys[k]] as num).toInt(),
+                      child: Container(height: 10, color: colors[k]),
+                    ),
+              ]),
+            ));
+            out.add(const SizedBox(height: 6));
+            out.add(Wrap(spacing: 14, children: [
+              for (var k = 0; k < 5; k++)
+                Text('${names[k]} ${(sm[keys[k]] as num?)?.toInt() ?? 0}',
+                    style: TextStyle(fontSize: 12.5, color: colors[k])),
+            ]));
+          }
+        }
+        if (acts.isNotEmpty) {
+          out.add(const SizedBox(height: 12));
+          const hs2 = TextStyle(fontSize: 12.5, color: _cMuted);
+          out.add(const Row(children: [
+            Expanded(flex: 2, child: Text('Fecha', style: hs2)),
+            Expanded(flex: 3, child: Text('Firma', style: hs2)),
+            Expanded(flex: 2, child: Text('Acción', style: hs2)),
+            Expanded(flex: 4, child: Text('Recomendación', style: hs2)),
+            Expanded(
+                flex: 3,
+                child: Text('Precio objetivo',
+                    textAlign: TextAlign.right, style: hs2)),
+          ]));
+          for (final x in acts) {
+            String g(dynamic v) =>
+                v == null ? '' : (_kGradeEs[v.toString()] ?? v.toString());
+            final act = x['action']?.toString() ?? '';
+            final col = act == 'up' ? _kGreen : (act == 'down' ? _kRed : null);
+            final from = g(x['from']), to = g(x['to']);
+            final pt = _d(x['pt']), pp = _d(x['pt_prev']);
+            out.add(Container(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: const BoxDecoration(
+                  border: Border(bottom: BorderSide(color: _cDivider))),
+              child: Row(children: [
+                Expanded(
+                    flex: 2,
+                    child: Text(_fmtDate(x['date'].toString()),
+                        style: const TextStyle(fontSize: 13))),
+                Expanded(
+                    flex: 3,
+                    child: Text((x['firm'] ?? '').toString(),
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600))),
+                Expanded(
+                    flex: 2,
+                    child: Text(_kActionEs[act] ?? act,
+                        style: TextStyle(fontSize: 13, color: col))),
+                Expanded(
+                    flex: 4,
+                    child: Text(
+                        from.isNotEmpty && from != to ? '$from → $to' : to,
+                        style: const TextStyle(fontSize: 13))),
+                Expanded(
+                    flex: 3,
+                    child: Text(
+                        pt == null || pt == 0
+                            ? '–'
+                            : '${pp != null && pp > 0 && pp != pt ? '${_num(pp, 0)} → ' : ''}${_num(pt, 0)} $cs',
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                            fontSize: 13,
+                            color:
+                                pp == null || pt == null || pp == 0 || pp == pt
+                                    ? null
+                                    : (pt > pp ? _kGreen : _kRed)))),
+              ]),
+            ));
+          }
+        }
+      }
+    }
+    return out;
+  }
+
   double get _px => _d(widget.row['price']) ?? 0;
   double get _atrAbs => (_d(widget.row['atr_pct']) ?? 2) * _px / 100;
 
@@ -5533,6 +6186,7 @@ class _DetailState extends State<_Detail> {
         TextEditingController(text: e.toStringAsFixed(2).replaceAll('.', ','));
     _stop =
         TextEditingController(text: s.toStringAsFixed(2).replaceAll('.', ','));
+    _loadInfo();
   }
 
   @override
@@ -5594,7 +6248,6 @@ class _DetailState extends State<_Detail> {
 
   Widget _kv(String k, String v, {Color? color}) {
     return Container(
-      width: 190,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
       decoration: BoxDecoration(
         color: _cSurface,
@@ -5628,25 +6281,29 @@ class _DetailState extends State<_Detail> {
     const k = TextStyle(fontSize: 13.5, color: _cMuted);
     const v =
         TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: _cText);
-    return Text.rich(
-      TextSpan(children: [
-        const TextSpan(text: 'Precio ', style: k),
-        TextSpan(text: px == null ? '–' : '${_num(px, 2)} $cs', style: v),
-        const TextSpan(text: '   ·   Máx. 52 sem. ', style: k),
-        TextSpan(text: hi == null ? '–' : '${_num(hi, 2)} $cs', style: v),
-        TextSpan(
-            text: pc(dh),
-            style: TextStyle(
-                fontSize: 13.5, color: (dh ?? 0) < 0 ? _kRed : _kGreen)),
-        const TextSpan(text: '   ·   Mín. 52 sem. ', style: k),
-        TextSpan(text: lo == null ? '–' : '${_num(lo, 2)} $cs', style: v),
-        TextSpan(
-            text: pc(dl),
-            style: TextStyle(
-                fontSize: 13.5, color: (dl ?? 0) > 0 ? _kGreen : _kRed)),
-      ]),
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
+    // Cada dato en un bloque que no se parte: si no cabe, pasa entero a la línea siguiente
+    Widget seg(String label, String value, [String extra = '', Color? ec]) =>
+        Text.rich(
+          TextSpan(children: [
+            TextSpan(text: label, style: k),
+            TextSpan(text: value, style: v),
+            if (extra.isNotEmpty)
+              TextSpan(
+                  text: extra, style: TextStyle(fontSize: 13.5, color: ec)),
+          ]),
+          softWrap: false,
+        );
+    return Wrap(
+      spacing: 18,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        seg('Precio ', px == null ? '–' : '${_num(px, 2)} $cs'),
+        seg('Máx. 52 sem. ', hi == null ? '–' : '${_num(hi, 2)} $cs', pc(dh),
+            (dh ?? 0) < 0 ? _kRed : _kGreen),
+        seg('Mín. 52 sem. ', lo == null ? '–' : '${_num(lo, 2)} $cs', pc(dl),
+            (dl ?? 0) > 0 ? _kGreen : _kRed),
+      ],
     );
   }
 
@@ -5733,8 +6390,6 @@ class _DetailState extends State<_Detail> {
                         color: widget.accent)),
                 const SizedBox(height: 2),
                 Text(_stopSrc,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 13, color: _cMuted)),
               ],
             ),
@@ -5748,12 +6403,18 @@ class _DetailState extends State<_Detail> {
             Text(label, style: const TextStyle(fontSize: 15, color: _cMuted)),
             const SizedBox(width: 10),
             SizedBox(
-              width: 112,
+              width: 130,
               child: TextField(
                 controller: c,
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
-                style: const TextStyle(fontSize: 17),
+                style: const TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.w700, color: _kEdit),
+                decoration: const InputDecoration(
+                  suffixIcon: Icon(Icons.edit, size: 16, color: _kEdit),
+                  suffixIconConstraints:
+                      BoxConstraints(minWidth: 26, minHeight: 20),
+                ),
                 onChanged: (_) => setState(() {}),
               ),
             ),
@@ -5949,14 +6610,20 @@ class _DetailState extends State<_Detail> {
           color: widget.regime == 'rojo' ? _kRed : _kAmber));
     }
     if (byCap < byRisk) chips.add(_chip('Limitado por', 'posición máxima'));
-    final bd = r['earn_bd'];
     final de = r['days_to_earn'];
-    if (bd != null) {
-      chips.add(_chip('Resultados en', '$bd días hábiles',
-          color: (bd is num && bd <= 15) ? _kRed : null));
-    } else if (de != null) {
-      chips.add(_chip('Resultados en', '$de días',
-          color: (de is num && de <= 21) ? _kRed : null));
+    if (de is num) {
+      final lim =
+          _ruleOn(_long ? 'long' : 'short', 'earn') ?? (_long ? 21 : 14);
+      chips.add(_chip(
+          'Resultados en', de == 0 ? 'hoy' : (de == 1 ? '1 día' : '$de días'),
+          color: de <= lim ? _kRed : null));
+    }
+    final dx0 = r['days_to_exdiv'];
+    if (dx0 is num) {
+      final dy = _d(r['div_yield']);
+      chips.add(_chip('Ex-dividendo en',
+          '${dx0 == 1 ? '1 día' : '$dx0 días'}${dy != null && dy > 0 ? ' (${_num(dy, 2)} % anual)' : ''}',
+          color: !_long ? _kAmber : null));
     }
     if (!_long) {
       final dy = _d(r['div_yield']) ?? 0;
@@ -5964,8 +6631,6 @@ class _DetailState extends State<_Detail> {
         chips.add(_chip(
             'Dividendo a pagar (año)', '${_num(capital * dy / 100, 0)} $cs'));
       }
-      final dx = r['days_to_exdiv'];
-      if (dx != null) chips.add(_chip('Ex-dividendo en', '$dx días'));
       final sf = _d(r['short_float']);
       if (sf != null) chips.add(_chip('Short % float', '${_num(sf, 1)} %'));
       final bf = _d(r['borrow_fee']);
@@ -6058,7 +6723,7 @@ class _DetailState extends State<_Detail> {
         child: Text(cat,
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
       ));
-      sections.add(Wrap(spacing: 8, runSpacing: 8, children: tiles));
+      sections.add(_equalRows(tiles));
     }
     return DraggableScrollableSheet(
       expand: false,
@@ -6092,6 +6757,7 @@ class _DetailState extends State<_Detail> {
             const SizedBox(height: 6),
             const Text('Desliza hacia arriba para ver todos los datos.',
                 style: TextStyle(fontSize: 12, color: _cMuted)),
+            ..._infoSections(),
             ...sections,
           ],
         ),
