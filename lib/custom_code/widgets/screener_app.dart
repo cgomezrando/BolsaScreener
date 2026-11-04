@@ -1222,6 +1222,153 @@ void _rulesFromJson(dynamic j) {
   _hard = out;
 }
 
+// ----------------------------------------------------------------- puntuación (editable)
+
+class _SpSpec {
+  const _SpSpec(this.key, this.label, this.group,
+      {this.unit = '', this.help, this.dec = 1});
+  final String key;
+  final String label;
+  final String group; // componente al que pertenece
+  final String unit;
+  final String? help;
+  final int dec;
+}
+
+const List<_SpSpec> _kSpSpecs = [
+  _SpSpec('w_rs3', 'Peso', 'Fuerza relativa 3 meses frente a su sector',
+      unit: 'puntos',
+      dec: 0,
+      help: 'Percentil entre los valores que pasan los filtros duros.'),
+  _SpSpec('w_rs1', 'Peso', 'Fuerza relativa 1 mes frente a su índice',
+      unit: 'puntos', dec: 0),
+  _SpSpec('w_entry', 'Peso', 'Entrada: distancia a la EMA20 en ATR',
+      unit: 'puntos',
+      dec: 0,
+      help: 'Premia entrar cerca de la EMA20 y no estirado.'),
+  _SpSpec('entry_full', 'Puntos completos hasta',
+      'Entrada: distancia a la EMA20 en ATR',
+      unit: 'ATR'),
+  _SpSpec('entry_mid', 'Puntos parciales hasta',
+      'Entrada: distancia a la EMA20 en ATR',
+      unit: 'ATR'),
+  _SpSpec('entry_mid_pct', 'Parte del peso en ese tramo',
+      'Entrada: distancia a la EMA20 en ATR',
+      unit: '%', dec: 0),
+  _SpSpec('entry_neg_pct', 'Parte del peso si está al otro lado de la EMA20',
+      'Entrada: distancia a la EMA20 en ATR',
+      unit: '%', dec: 0),
+  _SpSpec('w_rr', 'Peso', 'Beneficio/riesgo real', unit: 'puntos', dec: 0),
+  _SpSpec('rr_min', 'Cero puntos con B/R de', 'Beneficio/riesgo real'),
+  _SpSpec('rr_full', 'Puntos completos con B/R de', 'Beneficio/riesgo real'),
+  _SpSpec('w_vol', 'Peso', 'Volumen relativo', unit: 'puntos', dec: 0),
+  _SpSpec('vol_full', 'Puntos completos con volumen ≥ (y precio a favor)',
+      'Volumen relativo',
+      unit: '×'),
+  _SpSpec('vol_half', 'Mitad de puntos con volumen ≥', 'Volumen relativo',
+      unit: '×'),
+  _SpSpec('w_adx', 'Peso', 'ADX (fuerza de la tendencia)',
+      unit: 'puntos', dec: 0),
+  _SpSpec('adx_min', 'Puntos completos con ADX desde',
+      'ADX (fuerza de la tendencia)',
+      dec: 0),
+  _SpSpec('adx_max', 'hasta', 'ADX (fuerza de la tendencia)', dec: 0),
+  _SpSpec('adx_out_pct', 'Parte del peso fuera de ese rango',
+      'ADX (fuerza de la tendencia)',
+      unit: '%', dec: 0),
+  _SpSpec('w_room', 'Peso', 'Colchón hasta el máximo (mínimo) de 52 semanas',
+      unit: 'puntos', dec: 0),
+  _SpSpec('room_min', 'Puntos si queda al menos',
+      'Colchón hasta el máximo (mínimo) de 52 semanas',
+      unit: '%'),
+  _SpSpec('w_candle', 'Peso', 'Vela de la última sesión',
+      unit: 'puntos',
+      dec: 0,
+      help:
+          'Martillo (estrella en cortos): puntos completos. Mecha a favor más larga: la mitad.'),
+  _SpSpec('w_struct', 'Peso', 'Estructura de máximos y mínimos',
+      unit: 'puntos',
+      dec: 0,
+      help: 'Crecientes en largos / decrecientes en cortos: puntos completos.'),
+  _SpSpec('w_figure', 'Peso', 'Figura (doble suelo / doble techo)',
+      unit: 'puntos',
+      dec: 0,
+      help:
+          'Doble suelo (techo en cortos) confirmado: completos; en formación: la mitad.'),
+  _SpSpec('mkt_verde', 'Mercado VERDE', 'Multiplicador por semáforo de mercado',
+      unit: '×', dec: 2),
+  _SpSpec('mkt_ambar', 'Mercado ÁMBAR', 'Multiplicador por semáforo de mercado',
+      unit: '×', dec: 2),
+  _SpSpec('mkt_rojo', 'Mercado ROJO', 'Multiplicador por semáforo de mercado',
+      unit: '×', dec: 2),
+];
+
+const List<String> _kSpWeights = [
+  'w_rs3',
+  'w_rs1',
+  'w_entry',
+  'w_rr',
+  'w_vol',
+  'w_adx',
+  'w_room',
+  'w_candle',
+  'w_struct',
+  'w_figure'
+];
+
+Map<String, Map<String, double>> _defaultScore() {
+  Map<String, double> base() => {
+        'w_rs3': 15,
+        'w_rs1': 15,
+        'w_entry': 25,
+        'entry_full': 1,
+        'entry_mid': 2,
+        'entry_mid_pct': 60,
+        'entry_neg_pct': 60,
+        'w_rr': 20,
+        'rr_min': 1.5,
+        'rr_full': 3,
+        'w_vol': 10,
+        'vol_full': 1.2,
+        'vol_half': 1,
+        'w_adx': 10,
+        'adx_min': 20,
+        'adx_max': 40,
+        'adx_out_pct': 40,
+        'w_room': 5,
+        'room_min': 5,
+        'w_candle': 0,
+        'w_struct': 0,
+        'w_figure': 0,
+      };
+  return {
+    'long': {...base(), 'mkt_verde': 1, 'mkt_ambar': 0.7, 'mkt_rojo': 0.5},
+    'short': {...base(), 'mkt_verde': 0.7, 'mkt_ambar': 1, 'mkt_rojo': 1},
+  };
+}
+
+/// Parámetros de puntuación vigentes (editables; se sincronizan con los ajustes).
+Map<String, Map<String, double>> _sp = _defaultScore();
+
+double _spv(String mode, String k) =>
+    _sp[mode]?[k] ?? _defaultScore()[mode]![k] ?? 0;
+
+Map<String, dynamic> _scoreToJson() => {for (final m in _sp.keys) m: _sp[m]};
+
+void _scoreFromJson(dynamic j) {
+  if (j is! Map) return;
+  final out = _defaultScore();
+  for (final m in out.keys) {
+    final mm = j[m];
+    if (mm is! Map) continue;
+    for (final k in out[m]!.keys) {
+      final v = mm[k];
+      if (v is num) out[m]![k] = v.toDouble();
+    }
+  }
+  _sp = out;
+}
+
 String _capLabel(String mode) {
   final c = _ruleOn(mode, 'target_cap');
   return c == null ? 'tope' : '${_num(c, c == c.roundToDouble() ? 0 : 1)} ATR';
@@ -1656,6 +1803,8 @@ class _HomeState extends State<_Home> {
   double? _fx;
   Map<String, dynamic> _regime = {};
   List<Map<String, dynamic>> _macro = [];
+  DateTime?
+      _groupsLive; // hora de la última actualización al momento de Sectores e índices
   bool _showRed = false;
   String _asof = '';
   String _snapMode = 'close';
@@ -1796,6 +1945,7 @@ class _HomeState extends State<_Home> {
         'risk': _risk,
         'maxPos': _maxPos,
         'hard': _rulesToJson(),
+        'score': _scoreToJson(),
         'pfCols': _pfCols,
       };
 
@@ -1848,6 +1998,7 @@ class _HomeState extends State<_Home> {
       final mp = _d(j['maxPos']);
       if (mp != null && mp > 0) _maxPos = mp;
       if (j['hard'] != null) _rulesFromJson(j['hard']);
+      if (j['score'] != null) _scoreFromJson(j['score']);
       final pfc = (j['pfCols'] as List?)
           ?.map((e) => e.toString())
           .where(_kFieldMap.containsKey)
@@ -1964,6 +2115,27 @@ class _HomeState extends State<_Home> {
       _maxPos = p.getDouble('scr_maxpos') ?? _maxPos;
       final hs = p.getString('scr_hard');
       if (hs != null) _rulesFromJson(jsonDecode(hs));
+      final ss = p.getString('scr_score');
+      if (ss != null) _scoreFromJson(jsonDecode(ss));
+      final go = p.getString('scr_gorder');
+      if (go != null) {
+        (jsonDecode(go) as Map).forEach((k, v) {
+          if (v is List)
+            _gOrder[k.toString()] = v.map((e) => e.toString()).toList();
+        });
+      }
+      final gw = p.getString('scr_gw');
+      if (gw != null) {
+        (jsonDecode(gw) as Map).forEach((k, v) {
+          if (v is Map) {
+            _gW[k.toString()] = {
+              for (final e in v.entries)
+                if (e.value is num)
+                  e.key.toString(): (e.value as num).toDouble()
+            };
+          }
+        });
+      }
       final pc = p.getStringList('scr_pfcols');
       if (pc != null && pc.isNotEmpty) {
         final c = pc.where(_kFieldMap.containsKey).toList();
@@ -2001,6 +2173,9 @@ class _HomeState extends State<_Home> {
       p.setDouble('scr_risk', _risk);
       p.setDouble('scr_maxpos', _maxPos);
       p.setString('scr_hard', jsonEncode(_rulesToJson()));
+      p.setString('scr_score', jsonEncode(_scoreToJson()));
+      p.setString('scr_gorder', jsonEncode(_gOrder));
+      p.setString('scr_gw', jsonEncode(_gW));
       p.setStringList('scr_pfcols', _pfCols);
       p.setString('scr_pfw', jsonEncode(_pfColW));
     } catch (_) {}
@@ -2062,6 +2237,7 @@ class _HomeState extends State<_Home> {
         _sectorsEu = Map<String, dynamic>.from((j['sectors_eu'] as Map?) ?? {});
         _fx = _d(((j['fx'] as Map?) ?? {})['EURUSD']);
         _regime = Map<String, dynamic>.from((j['regime'] as Map?) ?? {});
+        _groupsLive = null;
         _macro = ((j['macro'] as List?) ?? [])
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
@@ -2269,6 +2445,19 @@ class _HomeState extends State<_Home> {
   /// semáforo de mercado de esos valores.
   Set<String> _liveRefs(Set<String> tickers) {
     final out = <String>{'SPY', 'QQQ', 'DIA', '^VIX', '^IBEX', '^GDAXI'};
+    // Tablas de «Sectores e índices»: índices, ETFs de sector e industria y mercados/macro
+    out.addAll(_bench.keys);
+    for (final g in [_sectors, _sectorsEu, _industries]) {
+      for (final v in g.values) {
+        final e = (v as Map?)?['etf'];
+        if (e is String && e.isNotEmpty) out.add(e);
+      }
+    }
+    out.addAll(_industries.keys);
+    for (final m in _macro) {
+      final sym = m['sym'];
+      if (sym is String) out.add(sym);
+    }
     final byT = {for (final r in _rows) r['ticker']?.toString(): r};
     for (final t in tickers) {
       final r = byT[t];
@@ -2355,9 +2544,61 @@ class _HomeState extends State<_Home> {
         _regime['eu'] = eu;
       }
     }
+    _mergeGroups(refs);
     _applyPortfolio();
     _computePlans();
     return n;
+  }
+
+  /// Actualiza las tablas de «Sectores e índices» con los datos al momento.
+  void _mergeGroups(Map<String, Map<String, dynamic>> refs) {
+    const keys = ['d_ema20', 'd_ema50', 'd_ema200', 'rsi_d', 'trend'];
+    void upd(Map<String, dynamic> g, String sym) {
+      final m = refs[sym];
+      if (m == null) return;
+      for (final k in _kPeriods.keys) {
+        if (m['r_$k'] != null) g['r_$k'] = m['r_$k'];
+      }
+      for (final k in keys) {
+        if (m[k] != null) g[k] = m[k];
+      }
+    }
+
+    for (final e in _bench.entries) {
+      if (e.value is Map) {
+        final g = Map<String, dynamic>.from(e.value as Map);
+        upd(g, e.key);
+        _bench[e.key] = g;
+      }
+    }
+    for (final grp in [_sectors, _sectorsEu, _industries]) {
+      for (final e in grp.entries.toList()) {
+        if (e.value is! Map) continue;
+        final g = Map<String, dynamic>.from(e.value as Map);
+        final etf = (g['etf'] ?? e.key).toString();
+        upd(g, etf);
+        grp[e.key] = g;
+      }
+    }
+    for (final row in _macro) {
+      final m = refs[row['sym']];
+      final px = _d(m?['price']);
+      if (m == null || px == null) continue;
+      final y = row['kind'] == 'yield';
+      double? chg(double? r) {
+        if (r == null) return null;
+        if (!y) return r;
+        final prev = px / (1 + r / 100);
+        return (px - prev) * 100; // puntos básicos
+      }
+
+      row['price'] = px;
+      row['1d'] = chg(_d(m['chg_1d']));
+      for (final k in _kPeriods.keys) {
+        row[k] = chg(_d(m['r_$k']));
+      }
+    }
+    _groupsLive = DateTime.now();
   }
 
   /// Valores en pantalla en Largos y en Cortos (cada modo con sus filtros y su plan).
@@ -2570,7 +2811,7 @@ class _HomeState extends State<_Home> {
                     child: CircularProgressIndicator(
                         strokeWidth: 2, color: Colors.white))
                 : const Icon(Icons.bolt, size: 18),
-            label: Text(_pfQuoting ? 'Actualizando…' : 'Precios al momento'),
+            label: Text(_pfQuoting ? 'Actualizando…' : 'Actualizar precios'),
           ),
         ]),
         const SizedBox(height: 4),
@@ -3076,19 +3317,22 @@ class _HomeState extends State<_Home> {
     );
   }
 
-  /// Puntuación 0-100 sobre los valores que pasan los filtros.
-  /// Fuerza relativa 30 (15 percentil 3m vs sector + 15 percentil 1m vs índice),
-  /// entrada 25 (extensión sobre EMA20 en ATR), B/R 20, volumen 10, ADX 10,
-  /// colchón hasta máx./mín. 52 sem. 5. Multiplicador por régimen de mercado.
+  /// Puntuación 0-100 sobre los valores que pasan los filtros duros.
+  /// Pesos y umbrales editables («Editar puntuación»); se normaliza a 100 con la
+  /// suma de pesos y se multiplica por el semáforo de mercado.
   void _score(List<Map<String, dynamic>> all) {
     final long = _mode == 'long';
+    final m = long ? 'long' : 'short';
+    double p(String k) => _spv(m, k);
     for (final r in all) {
       r['score'] = null;
       final st = _regimeOf(r);
-      r['mkt_mult'] = long
-          ? (st == 'verde' ? 1.0 : (st == 'ambar' ? 0.7 : 0.5))
-          : (st == 'verde' ? 0.7 : 1.0);
+      r['mkt_mult'] = st == 'verde'
+          ? p('mkt_verde')
+          : (st == 'ambar' ? p('mkt_ambar') : p('mkt_rojo'));
     }
+    final totW = _kSpWeights.fold<double>(0, (s, k) => s + math.max(0, p(k)));
+    if (totW <= 0) return;
     final rows = all.where((r) => r['swing_ok'] == true).toList();
     final sign = long ? 1.0 : -1.0;
     Map<Map<String, dynamic>, double> pctRank(
@@ -3111,26 +3355,139 @@ class _HomeState extends State<_Home> {
     final rs3 = pctRank((r) => _d(r['rs_sec_3m']) ?? _d(r['rs_ind_3m']));
     final rs1 = pctRank((r) => _d(r['rs_idx_1m']) ?? _d(r['rs_spy_1m']));
     for (final r in rows) {
-      var sc = 15 * (rs3[r] ?? 0) + 15 * (rs1[r] ?? 0);
+      var sc = p('w_rs3') * (rs3[r] ?? 0) + p('w_rs1') * (rs1[r] ?? 0);
       final ext = _d(r['a_ema20']);
       if (ext != null) {
         final e = ext * sign;
-        sc += e < 0 ? 15 : (e <= 1 ? 25 : (e <= 2 ? 15 : 0));
+        final w = p('w_entry');
+        sc += e < 0
+            ? w * p('entry_neg_pct') / 100
+            : (e <= p('entry_full')
+                ? w
+                : (e <= p('entry_mid') ? w * p('entry_mid_pct') / 100 : 0));
       }
       final rr = _d(r['p_rr']);
-      if (rr != null) sc += 20 * ((rr - 1.5) / 1.5).clamp(0.0, 1.0);
+      final rrSpan = p('rr_full') - p('rr_min');
+      if (rr != null && rrSpan > 0) {
+        sc += p('w_rr') * ((rr - p('rr_min')) / rrSpan).clamp(0.0, 1.0);
+      }
       final vr = _d(r['vol_rel']);
       final chg = _d(r['chg_1d']) ?? 0;
       if (vr != null) {
         final withMove = long ? chg > 0 : chg < 0;
-        sc += (vr >= 1.2 && withMove) ? 10 : (vr >= 1 ? 5 : 0);
+        sc += (vr >= p('vol_full') && withMove)
+            ? p('w_vol')
+            : (vr >= p('vol_half') ? p('w_vol') / 2 : 0);
       }
       final ax = _d(r['adx']);
-      if (ax != null) sc += (ax >= 20 && ax <= 40) ? 10 : 4;
+      if (ax != null) {
+        sc += (ax >= p('adx_min') && ax <= p('adx_max'))
+            ? p('w_adx')
+            : p('w_adx') * p('adx_out_pct') / 100;
+      }
       final room = long ? _d(r['d_high52']) : _d(r['d_low52']);
-      if (room != null && (long ? room <= -5 : room >= 5)) sc += 5;
-      r['score'] = (sc * (_d(r['mkt_mult']) ?? 1.0)).round();
+      if (room != null &&
+          (long ? room <= -p('room_min') : room >= p('room_min'))) {
+        sc += p('w_room');
+      }
+      final cdl = r['cdl']?.toString();
+      if (cdl != null) {
+        if (cdl == (long ? 'martillo' : 'estrella')) {
+          sc += p('w_candle');
+        } else if (cdl == (long ? 'mecha inf.' : 'mecha sup.')) {
+          sc += p('w_candle') / 2;
+        }
+      }
+      final st = r['struct']?.toString() ?? '';
+      if (st.startsWith(long ? 'máx. y mín. crec' : 'máx. y mín. decrec'))
+        sc += p('w_struct');
+      final fig = r['figure']?.toString() ?? '';
+      if (fig.startsWith(long ? 'doble suelo' : 'doble techo')) {
+        sc += fig.contains('confirmado') ? p('w_figure') : p('w_figure') / 2;
+      }
+      r['score'] = (sc / totW * 100 * (_d(r['mkt_mult']) ?? 1.0)).round();
     }
+  }
+
+  Future<void> _editScore() async {
+    final m = _mode;
+    final res = await showDialog<Map<String, double>>(
+      context: context,
+      builder: (_) => _themed(_ScoreDialog(mode: m)),
+    );
+    if (res == null || !mounted) return;
+    setState(() {
+      _sp[m] = res;
+      _computePlans();
+    });
+    _save();
+  }
+
+  Widget _scoreCard() {
+    final m = _mode;
+    String n0(double v) => _num(v, v == v.roundToDouble() ? 0 : 1);
+    final names = {
+      'w_rs3': 'Fuerza rel. 3m vs sector',
+      'w_rs1': 'Fuerza rel. 1m vs índice',
+      'w_entry': 'Entrada (cerca de la EMA20)',
+      'w_rr': 'B/R real',
+      'w_vol': 'Volumen',
+      'w_adx': 'ADX',
+      'w_room': 'Colchón 52 sem.',
+      'w_candle': 'Vela',
+      'w_struct': 'Estructura',
+      'w_figure': 'Figura',
+    };
+    final active = _kSpWeights.where((k) => _spv(m, k) > 0).toList();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
+      decoration: BoxDecoration(
+        color: _cSurface,
+        border: Border.all(color: _cBorder),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Expanded(
+              child: Text('Puntuación',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+            TextButton.icon(
+              style: TextButton.styleFrom(foregroundColor: _accent),
+              onPressed: _editScore,
+              icon: const Icon(Icons.tune, size: 18),
+              label: const Text('Editar'),
+            ),
+          ]),
+          const Text(
+              'Pesos (se escalan a 100). Solo puntúan los que pasan los filtros duros.',
+              style: TextStyle(fontSize: 12, color: _cMuted)),
+          const SizedBox(height: 8),
+          for (final k in active)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 3),
+              child: Row(children: [
+                Expanded(
+                    child: Text(names[k] ?? k,
+                        style: const TextStyle(fontSize: 13))),
+                Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: Text(n0(_spv(m, k)),
+                      style: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600)),
+                ),
+              ]),
+            ),
+          const SizedBox(height: 4),
+          Text(
+              'Mercado: verde ×${n0(_spv(m, 'mkt_verde'))} · ámbar ×${n0(_spv(m, 'mkt_ambar'))} · '
+              'rojo ×${n0(_spv(m, 'mkt_rojo'))}',
+              style: const TextStyle(fontSize: 12, color: _cMuted)),
+        ],
+      ),
+    );
   }
 
   // ---------------------------------------------------- lógica
@@ -3735,8 +4092,11 @@ class _HomeState extends State<_Home> {
       ),
     ];
     final left = <Widget>[
-      _modeToggle(),
-      const SizedBox(width: 28),
+      // Largos/Cortos solo tienen efecto en el Screener
+      if (_tab == 0) ...[
+        _modeToggle(),
+        const SizedBox(width: 28),
+      ],
       _tabBtn(0, 'Screener'),
       _tabBtn(1, 'Sectores e índices'),
       if (_pfAllowed) _tabBtn(2, 'Cartera'),
@@ -3928,6 +4288,8 @@ class _HomeState extends State<_Home> {
           ),
         const SizedBox(height: 16),
         _rulesCard(),
+        const SizedBox(height: 12),
+        _scoreCard(),
         const SizedBox(height: 20),
         const Divider(color: _cDivider, height: 1),
         const SizedBox(height: 22),
@@ -4171,14 +4533,14 @@ class _HomeState extends State<_Home> {
                 child: Text(
                   '${onlyFav ? 'Solo favoritos (los filtros no se aplican)' : 'Orden: ${_kFieldMap[sk]?.label ?? sk} '
                       '${_sortAsc[_mode]! ? '↑' : '↓'}'}'
-                  '${_liveAt != null ? ' · $_liveCount al momento ${_two(_liveAt!.hour)}:${_two(_liveAt!.minute)}' : ''}',
+                  '${_liveAt != null ? ' · precios de las ${_two(_liveAt!.hour)}:${_two(_liveAt!.minute)} ($_liveCount valores)' : ''}',
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 13.5, color: _cMuted),
                 ),
               ),
               Tooltip(
                 message:
-                    'Precios y técnico al momento de los valores en pantalla en Largos '
+                    'Actualiza precios y técnico de los valores en pantalla en Largos '
                     'y en Cortos, hasta $_kMaxLive en total (vela de hoy provisional)',
                 child: FilledButton.icon(
                   style: _fillStyle(const Color(0xFF2E5FA8)),
@@ -4190,7 +4552,8 @@ class _HomeState extends State<_Home> {
                           child: CircularProgressIndicator(
                               strokeWidth: 2, color: Colors.white))
                       : const Icon(Icons.bolt, size: 18),
-                  label: Text(_liveBusy ? 'Actualizando…' : 'Al momento'),
+                  label:
+                      Text(_liveBusy ? 'Actualizando…' : 'Actualizar precios'),
                 ),
               ),
               IconButton(
@@ -4306,6 +4669,73 @@ class _HomeState extends State<_Home> {
     );
   }
 
+  // Columnas de las tablas de «Sectores e índices»: orden y anchura por tabla
+  final Map<String, List<String>> _gOrder = {};
+  final Map<String, Map<String, double>> _gW = {};
+
+  List<_GridCol> _gLayout(String table, List<_GridCol> cols) {
+    final ord = _gOrder[table];
+    final byK = {for (final c in cols) c.key: c};
+    final keys = <String>[
+      if (ord != null) ...ord.where(byK.containsKey),
+      ...cols.map((c) => c.key).where((k) => ord == null || !ord.contains(k)),
+    ];
+    final w = _gW[table] ?? const {};
+    return [
+      for (final k in keys)
+        _GridCol(
+          key: byK[k]!.key,
+          label: byK[k]!.label,
+          width: w[k] ?? byK[k]!.width,
+          text: byK[k]!.text,
+          color: byK[k]!.color,
+          leading: byK[k]!.leading,
+          trailing: byK[k]!.trailing,
+          right: byK[k]!.right,
+          bold: byK[k]!.bold,
+        ),
+    ];
+  }
+
+  void _gMove(String table, List<_GridCol> cols, String from, String to) {
+    final l = _gOrder[table] ?? cols.map((c) => c.key).toList();
+    final i = l.indexOf(from);
+    final j = l.indexOf(to);
+    if (i < 0 || j < 0 || i == j) return;
+    setState(() {
+      l.removeAt(i);
+      final j2 = l.indexOf(to);
+      l.insert(i < j ? j2 + 1 : j2, from);
+      _gOrder[table] = l;
+    });
+    _save();
+  }
+
+  /// Ordenación, movimiento y anchura de columnas para una tabla de «Sectores e índices».
+  _Grid _gGrid(
+      String table, List<_GridCol> cols, List<Map<String, dynamic>> rows,
+      {String def = 'r_3m', void Function(Map<String, dynamic>)? onTap}) {
+    final lay = _gLayout(table, cols);
+    return _Grid(
+      cols: lay,
+      rows: rows,
+      shrink: true,
+      accent: _accent,
+      sortKey: _gSortKey[table] ?? (def.isEmpty ? null : def),
+      sortAsc: _gSortAsc[table] ?? false,
+      onSort: (k) => _gSort(table, k),
+      onTap: onTap,
+      onMove: (from, to) => _gMove(table, lay, from, to),
+      onResize: (k, w) =>
+          setState(() => (_gW[table] ??= {})[k] = w.clamp(48.0, 600.0)),
+      onResizeEnd: _save,
+      onResetWidth: (k) {
+        setState(() => _gW[table]?.remove(k));
+        _save();
+      },
+    );
+  }
+
   // Orden de cada tabla de «Sectores e índices» (clave de columna y sentido)
   final Map<String, String> _gSortKey = {};
   final Map<String, bool> _gSortAsc = {};
@@ -4376,16 +4806,10 @@ class _HomeState extends State<_Home> {
     ];
     final rows =
         _gSorted('macro', List<Map<String, dynamic>>.of(_macro), def: '');
-    return _Grid(
-      cols: cols,
-      rows: rows,
-      shrink: true,
-      accent: _accent,
-      sortKey: _gSortKey['macro'],
-      sortAsc: _gSortAsc['macro'] ?? false,
-      onSort: (k) => _gSort('macro', k),
-      onTap: (r) => _openTradingView(_tvMacro[r['sym']] ?? r['sym'].toString()),
-    );
+    return _gGrid('macro', cols, rows,
+        def: '',
+        onTap: (r) =>
+            _openTradingView(_tvMacro[r['sym']] ?? r['sym'].toString()));
   }
 
   static const Map<String, String> _tvMacro = {
@@ -4494,11 +4918,14 @@ class _HomeState extends State<_Home> {
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 32),
       children: [
         if (_macro.isNotEmpty) ...[
-          const Text('Mercados y macro', style: h),
+          Text(
+              _groupsLive == null
+                  ? 'Mercados y macro'
+                  : 'Mercados y macro · precios de las ${_two(_groupsLive!.hour)}:${_two(_groupsLive!.minute)}',
+              style: h),
           const SizedBox(height: 4),
           const Text(
-              'Bonos: rentabilidad en % y variaciones en puntos básicos (pb). Resto: variaciones en %. '
-              'El bono a 1 año no está en Yahoo: se muestran el de 3 meses y el de 2 años (futuro).',
+              'Bonos: rentabilidad en % y variaciones en puntos básicos (pb). Resto: variaciones en %.',
               style: sub),
           const SizedBox(height: 10),
           _macroGrid(),
@@ -4506,32 +4933,16 @@ class _HomeState extends State<_Home> {
         ],
         const Text('Índices', style: h),
         const SizedBox(height: 10),
-        _Grid(
-          cols: base,
-          rows: bench,
-          shrink: true,
-          accent: _accent,
-          sortKey: _gSortKey['bench'] ?? 'r_3m',
-          sortAsc: _gSortAsc['bench'] ?? false,
-          onSort: (k) => _gSort('bench', k),
-        ),
+        _gGrid('bench', base, bench),
         const SizedBox(height: 30),
         const Text('Sectores EE. UU.', style: h),
         const SizedBox(height: 4),
         const Text('Toca un sector para filtrar el screener por él.',
             style: sub),
         const SizedBox(height: 10),
-        _Grid(
-          cols: [...base, ...pe],
-          rows: secs,
-          shrink: true,
-          accent: _accent,
-          sortKey: _gSortKey['sec'] ?? 'r_3m',
-          sortAsc: _gSortAsc['sec'] ?? false,
-          onSort: (k) => _gSort('sec', k),
-          onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
-              markets: {'EE. UU.'}),
-        ),
+        _gGrid('sec', [...base, ...pe], secs,
+            onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
+                markets: {'EE. UU.'})),
         const SizedBox(height: 30),
         const Text('Sectores Europa (IBEX 35 + DAX 40)', style: h),
         const SizedBox(height: 4),
@@ -4540,17 +4951,9 @@ class _HomeState extends State<_Home> {
             'Toca un sector para filtrar los valores españoles y alemanes.',
             style: sub),
         const SizedBox(height: 10),
-        _Grid(
-          cols: [...base, ...pe],
-          rows: secsEu,
-          shrink: true,
-          accent: _accent,
-          sortKey: _gSortKey['seceu'] ?? 'r_3m',
-          sortAsc: _gSortAsc['seceu'] ?? false,
-          onSort: (k) => _gSort('seceu', k),
-          onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
-              markets: {'España', 'Alemania'}),
-        ),
+        _gGrid('seceu', [...base, ...pe], secsEu,
+            onTap: (m) => _applyGroupFilter('sector', m['_id'].toString(),
+                markets: {'España', 'Alemania'})),
         const SizedBox(height: 30),
         const Text('Industrias EE. UU.', style: h),
         const SizedBox(height: 4),
@@ -4559,16 +4962,8 @@ class _HomeState extends State<_Home> {
             'empresas del universo (solo PER positivos). Toca para filtrar.',
             style: sub),
         const SizedBox(height: 10),
-        _Grid(
-          cols: [...base, ...pe],
-          rows: inds,
-          shrink: true,
-          accent: _accent,
-          sortKey: _gSortKey['ind'] ?? 'r_3m',
-          sortAsc: _gSortAsc['ind'] ?? false,
-          onSort: (k) => _gSort('ind', k),
-          onTap: (m) => _applyGroupFilter('ind_name', m['_name'].toString()),
-        ),
+        _gGrid('ind', [...base, ...pe], inds,
+            onTap: (m) => _applyGroupFilter('ind_name', m['_name'].toString())),
       ],
     );
   }
@@ -5601,6 +5996,155 @@ class _RulesDialogState extends State<_RulesDialog> {
                   }
                   Navigator.pop(context, out);
                 },
+          child: const Text('Guardar'),
+        ),
+      ],
+    );
+  }
+}
+
+// ----------------------------------------------------------------- editor de puntuación
+
+class _ScoreDialog extends StatefulWidget {
+  const _ScoreDialog({required this.mode});
+  final String mode;
+
+  @override
+  State<_ScoreDialog> createState() => _ScoreDialogState();
+}
+
+class _ScoreDialogState extends State<_ScoreDialog> {
+  final Map<String, TextEditingController> _c = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load(_sp[widget.mode] ?? _defaultScore()[widget.mode]!);
+  }
+
+  void _load(Map<String, double> src) {
+    for (final s in _kSpSpecs) {
+      (_c[s.key] ??= TextEditingController()).text =
+          _plain(src[s.key] ?? _defaultScore()[widget.mode]![s.key]);
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in _c.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  double _total() => _kSpWeights.fold<double>(
+      0, (s, k) => s + math.max(0, _parse(_c[k]?.text ?? '') ?? 0));
+
+  String? _invalid() {
+    for (final s in _kSpSpecs) {
+      final v = _parse(_c[s.key]!.text);
+      if (v == null || v < 0) return s.label;
+    }
+    return _total() <= 0 ? 'pesos' : null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final long = widget.mode == 'long';
+    final accent = long ? _kGreen : _kRed;
+    final groups = <String, List<_SpSpec>>{};
+    for (final s in _kSpSpecs) {
+      groups.putIfAbsent(s.group, () => []).add(s);
+    }
+    final items = <Widget>[];
+    groups.forEach((g, specs) {
+      items.add(Padding(
+        padding: const EdgeInsets.only(top: 16, bottom: 6),
+        child: Text(g,
+            style: TextStyle(
+                fontSize: 14.5, fontWeight: FontWeight.w600, color: accent)),
+      ));
+      final help = specs.map((s) => s.help).whereType<String>().join(' ');
+      if (help.isNotEmpty) {
+        items.add(Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child:
+              Text(help, style: const TextStyle(fontSize: 12, color: _cMuted)),
+        ));
+      }
+      for (final s in specs) {
+        items.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(children: [
+            Expanded(
+                child: Text(s.label, style: const TextStyle(fontSize: 14))),
+            SizedBox(
+              width: 90,
+              child: TextField(
+                controller: _c[s.key],
+                textAlign: TextAlign.right,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                style: const TextStyle(
+                    fontSize: 15, fontWeight: FontWeight.w700, color: _kEdit),
+                decoration: const InputDecoration(
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 10, vertical: 9)),
+                onChanged: (_) => setState(() {}),
+              ),
+            ),
+            SizedBox(
+              width: 64,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Text(s.unit,
+                    style: const TextStyle(fontSize: 13, color: _cMuted)),
+              ),
+            ),
+          ]),
+        ));
+      }
+    });
+    final bad = _invalid();
+    return AlertDialog(
+      backgroundColor: _cPanel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: _cBorder),
+      ),
+      title: Row(children: [
+        Expanded(
+          child: Text(long ? 'Puntuación · largos' : 'Puntuación · cortos',
+              style: TextStyle(color: accent, fontWeight: FontWeight.w600)),
+        ),
+        Text('Suma de pesos: ${_num(_total(), 0)} → se escala a 100',
+            style: const TextStyle(fontSize: 13, color: _cMuted)),
+      ]),
+      content: SizedBox(
+        width: math.min(620, size.width - 48),
+        height: math.min(600, size.height - 220),
+        child: ListView(children: items),
+      ),
+      actions: [
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: _cMuted),
+          onPressed: () => setState(() => _load(_defaultScore()[widget.mode]!)),
+          child: const Text('Valores por defecto'),
+        ),
+        TextButton(
+            style: TextButton.styleFrom(foregroundColor: _cMuted),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancelar')),
+        FilledButton(
+          style: _fillStyle(long ? _kGreenFill : _kRedFill),
+          onPressed: bad != null
+              ? null
+              : () => Navigator.pop(context, {
+                    for (final s in _kSpSpecs)
+                      s.key: _parse(_c[s.key]!.text) ?? 0,
+                  }),
           child: const Text('Guardar'),
         ),
       ],
