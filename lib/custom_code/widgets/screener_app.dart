@@ -494,6 +494,26 @@ List<_Field> _buildFields() {
   n('chg_today', 'Hoy % (variación de hoy; vacío si aún no hay datos de hoy)',
       _cTec,
       s: true, w: 70, h: 'Hoy %');
+  n(
+      'pre_pct',
+      'Pre-apertura % (EE. UU., pre-market frente al último cierre; con «Actualizar precios»)',
+      _cTec,
+      s: true,
+      w: 80,
+      h: 'Pre-apertura %');
+  ch(
+      'pre_state',
+      'Plan en pre-apertura (en espera / abre activada / hueco excesivo / invalidada)',
+      _cPlan,
+      w: 110,
+      h: 'Pre-apertura plan');
+  n(
+      'score_pre',
+      'Puntuación pre-apertura (con la entrada al precio del pre-market)',
+      _cPlan,
+      dec: 0,
+      w: 80,
+      h: 'Punt. pre-apertura');
   n('chg_1d',
       'Última sesión % (variación del último cierre frente al anterior)', _cTec,
       s: true, h: 'Últ. sesión %');
@@ -688,6 +708,9 @@ const Map<String, List<String>> _kDefaultCols = {
     'discard',
     'price',
     'chg_today',
+    'pre_pct',
+    'pre_state',
+    'score_pre',
     'p_entry',
     'p_stop_pct',
     'p_stop_atr',
@@ -711,6 +734,9 @@ const Map<String, List<String>> _kDefaultCols = {
     'discard',
     'price',
     'chg_today',
+    'pre_pct',
+    'pre_state',
+    'score_pre',
     'p_entry',
     'p_stop_pct',
     'p_stop_atr',
@@ -735,6 +761,17 @@ const Map<String, List<String>> _kDefaultCols = {
 };
 
 const Map<String, String> _kHelp = {
+  'pre_state':
+      'Con el precio del pre-market (largos; cortos al revés): en espera = entre el stop y la '
+          'entrada; abre activada = por encima de la entrada hasta 0,5 ATR; hueco excesivo = más de 0,5 ATR; '
+          'invalidada = por debajo del stop.',
+  'score_pre':
+      'La puntuación recalculada entrando al precio del pre-market: si abre con hueco, baja el '
+          'B/R y aumenta la extensión sobre la EMA20. Invalidada = 0. En espera = igual que la puntuación.',
+  'pre_pct':
+      'Solo valores de EE. UU. y solo antes de la apertura (de 10:00 a 15:30 hora de España). '
+          'Se rellena al pulsar «Actualizar precios». El pre-market tiene poco volumen: es una pista de '
+          'cómo abrirá, no una señal.',
   'short_float':
       '% de las acciones en libre circulación que están vendidas a crédito (prestadas y '
           'vendidas por quien apuesta a la baja). Lo publica FINRA dos veces al mes. Por encima del 10 % '
@@ -1500,6 +1537,11 @@ Color? _colorFor(_Field f, dynamic v) {
   }
   if (f.key == 'figure')
     return v.toString().startsWith('doble suelo') ? _kGreen : _kRed;
+  if (f.key == 'pre_state') {
+    if (v == 'abre activada') return _kGreen;
+    if (v == 'hueco excesivo') return _kAmber;
+    if (v == 'invalidada') return _kRed;
+  }
   if (f.key == 'cdl') {
     if (v == 'martillo') return _kGreen;
     if (v == 'estrella') return _kRed;
@@ -1834,6 +1876,7 @@ class _HomeState extends State<_Home> {
     'pf_cost',
     'price',
     'chg_today',
+    'pre_pct',
     'pf_value',
     'pf_pnl',
     'pf_pnl_pct',
@@ -1911,6 +1954,8 @@ class _HomeState extends State<_Home> {
     } catch (_) {}
     await _pullSettings();
     _ensurePfChg();
+    _ensurePre();
+    _ensurePreScore();
     _save();
     _riskCtl.text = _plain(_risk);
     _maxCtl.text = _plain(_maxPos);
@@ -2907,6 +2952,14 @@ class _HomeState extends State<_Home> {
 
   bool get _isIntraday => _snapMode == 'intraday';
 
+  /// Hora de la última «Actualizar precios» (lista o cartera).
+  DateTime? get _lastPrices {
+    final a = _liveAt, b = _pfLive;
+    if (a == null) return b;
+    if (b == null) return a;
+    return a.isAfter(b) ? a : b;
+  }
+
   /// "Cierre del 27-10-2026" o "Intradía 28-10 16:45 (provisional)".
   String _asofLabel({bool lower = false}) {
     if (_isIntraday) {
@@ -3326,6 +3379,8 @@ class _HomeState extends State<_Home> {
     double p(String k) => _spv(m, k);
     for (final r in all) {
       r['score'] = null;
+      r['score_pre'] = null;
+      r['pre_state'] = null;
       final st = _regimeOf(r);
       r['mkt_mult'] = st == 'verde'
           ? p('mkt_verde')
@@ -3354,23 +3409,29 @@ class _HomeState extends State<_Home> {
 
     final rs3 = pctRank((r) => _d(r['rs_sec_3m']) ?? _d(r['rs_ind_3m']));
     final rs1 = pctRank((r) => _d(r['rs_idx_1m']) ?? _d(r['rs_spy_1m']));
+    double entryPts(double? ext) {
+      if (ext == null) return 0;
+      final e = ext * sign;
+      final w = p('w_entry');
+      return e < 0
+          ? w * p('entry_neg_pct') / 100
+          : (e <= p('entry_full')
+              ? w
+              : (e <= p('entry_mid') ? w * p('entry_mid_pct') / 100 : 0));
+    }
+
+    double rrPts(double? rr) {
+      final rrSpan = p('rr_full') - p('rr_min');
+      if (rr == null || rrSpan <= 0) return 0;
+      return p('w_rr') * ((rr - p('rr_min')) / rrSpan).clamp(0.0, 1.0);
+    }
+
     for (final r in rows) {
       var sc = p('w_rs3') * (rs3[r] ?? 0) + p('w_rs1') * (rs1[r] ?? 0);
       final ext = _d(r['a_ema20']);
-      if (ext != null) {
-        final e = ext * sign;
-        final w = p('w_entry');
-        sc += e < 0
-            ? w * p('entry_neg_pct') / 100
-            : (e <= p('entry_full')
-                ? w
-                : (e <= p('entry_mid') ? w * p('entry_mid_pct') / 100 : 0));
-      }
       final rr = _d(r['p_rr']);
-      final rrSpan = p('rr_full') - p('rr_min');
-      if (rr != null && rrSpan > 0) {
-        sc += p('w_rr') * ((rr - p('rr_min')) / rrSpan).clamp(0.0, 1.0);
-      }
+      final basePts = entryPts(ext) + rrPts(rr);
+      sc += basePts;
       final vr = _d(r['vol_rel']);
       final chg = _d(r['chg_1d']) ?? 0;
       if (vr != null) {
@@ -3405,7 +3466,44 @@ class _HomeState extends State<_Home> {
       if (fig.startsWith(long ? 'doble suelo' : 'doble techo')) {
         sc += fig.contains('confirmado') ? p('w_figure') : p('w_figure') / 2;
       }
-      r['score'] = (sc / totW * 100 * (_d(r['mkt_mult']) ?? 1.0)).round();
+      final mult = _d(r['mkt_mult']) ?? 1.0;
+      r['score'] = (sc / totW * 100 * mult).round();
+      // ---- Pre-apertura: cómo queda el plan si abre al precio del pre-market
+      final pre = _d(r['pre_px']);
+      final entry = _d(r['p_entry']), stop = _d(r['p_stop']);
+      final px = _d(r['price']), atrp = _d(r['atr_pct']);
+      if (pre == null ||
+          entry == null ||
+          stop == null ||
+          px == null ||
+          atrp == null) continue;
+      final atrAbs = atrp * px / 100;
+      if (atrAbs <= 0) continue;
+      final beyondStop = long ? pre <= stop : pre >= stop;
+      final triggered = long ? pre >= entry : pre <= entry;
+      if (beyondStop) {
+        r['pre_state'] = 'invalidada';
+        r['score_pre'] = 0;
+        continue;
+      }
+      if (!triggered) {
+        r['pre_state'] = 'en espera';
+        r['score_pre'] = r['score'];
+        continue;
+      }
+      final gap = (pre - entry).abs() / atrAbs;
+      r['pre_state'] = gap <= 0.5 ? 'abre activada' : 'hueco excesivo';
+      // Entrada real = precio de apertura (pre-market): nuevo B/R y nueva extensión
+      final tgt = _d(r['p_target']);
+      final dist = (pre - stop).abs();
+      final rrNew = (tgt != null && dist > 0)
+          ? (tgt - pre).abs() / dist * ((long ? tgt > pre : tgt < pre) ? 1 : 0)
+          : null;
+      final d20 = _d(r['d_ema20']);
+      final ema20 = d20 == null ? null : px / (1 + d20 / 100);
+      final extNew = ema20 == null ? ext : (pre - ema20) / atrAbs;
+      final scPre = sc - basePts + entryPts(extNew) + rrPts(rrNew);
+      r['score_pre'] = (scPre / totW * 100 * mult).round();
     }
   }
 
@@ -3595,6 +3693,34 @@ class _HomeState extends State<_Home> {
   }
 
   /// Añade una vez «Día %» junto al precio en Cartera, Largos y Cortos (columnas guardadas de antes).
+  /// Añade una vez «Pre-apertura %» justo después de «Hoy %» en Largos, Cortos y Cartera.
+  void _ensurePre() {
+    final p = _prefs;
+    if (p == null || (p.getBool('scr_pre_v1') ?? false)) return;
+    for (final l in [_pfCols, _cols['long']!, _cols['short']!]) {
+      if (l.contains('pre_pct')) continue;
+      final i = l.indexOf('chg_today');
+      l.insert(i < 0 ? l.length : i + 1, 'pre_pct');
+    }
+    p.setBool('scr_pre_v1', true);
+  }
+
+  /// Añade una vez «Pre-apertura plan» y «Punt. pre-apertura» tras «Pre-apertura %» (Largos y Cortos).
+  void _ensurePreScore() {
+    final p = _prefs;
+    if (p == null || (p.getBool('scr_prescore_v1') ?? false)) return;
+    for (final l in [_cols['long']!, _cols['short']!]) {
+      var i = l.indexOf('pre_pct');
+      if (i < 0) i = l.indexOf('chg_today');
+      for (final k in ['pre_state', 'score_pre']) {
+        if (l.contains(k)) continue;
+        i = i < 0 ? l.length : i + 1;
+        l.insert(i.clamp(0, l.length), k);
+      }
+    }
+    p.setBool('scr_prescore_v1', true);
+  }
+
   void _ensurePfChg() {
     final p = _prefs;
     if (p == null || (p.getBool('scr_chgtoday_v3') ?? false)) return;
@@ -3612,6 +3738,7 @@ class _HomeState extends State<_Home> {
     add(_pfCols);
     add(_cols['long']!);
     add(_cols['short']!);
+
     p.setBool('scr_chgtoday_v3', true);
   }
 
@@ -4066,9 +4193,19 @@ class _HomeState extends State<_Home> {
               style: const TextStyle(fontSize: 14, color: _kGreen)),
         ])
       else if (_asof.isNotEmpty)
-        Text(_asofLabel(),
-            style: TextStyle(
-                fontSize: 14, color: _isIntraday ? _kAmber : _cMuted)),
+        Text.rich(TextSpan(children: [
+          TextSpan(
+              text: _asofLabel(),
+              style: TextStyle(
+                  fontSize: 14, color: _isIntraday ? _kAmber : _cMuted)),
+          // Tras «Actualizar precios»: hora de los precios de la sesión
+          if (_lastPrices != null)
+            TextSpan(
+                text:
+                    '  ·  precios de las ${_two(_lastPrices!.hour)}:${_two(_lastPrices!.minute)} '
+                    'del ${_two(_lastPrices!.day)}-${_two(_lastPrices!.month)}',
+                style: const TextStyle(fontSize: 14, color: _kEdit)),
+        ])),
       const SizedBox(width: 8),
       IconButton(
         tooltip:
