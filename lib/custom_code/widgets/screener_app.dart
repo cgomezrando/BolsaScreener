@@ -13,6 +13,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart' as cf;
 import 'package:firebase_auth/firebase_auth.dart' as fba;
@@ -146,12 +147,18 @@ Future<void> _openTradingView(String ticker) async {
 
 class _CandleChart extends CustomPainter {
   _CandleChart(this.d, this.n,
-      {this.entry, this.stop, this.target, this.cur = '', this.hover});
+      {this.entry,
+      this.stop,
+      this.target,
+      this.cur = '',
+      this.hover,
+      this.off = 0});
   final Map<String, dynamic> d;
   final int n; // velas a mostrar
   final double? entry, stop, target;
   final String cur;
   final Offset? hover; // posición del cursor / dedo (cruz con valores)
+  final int off; // velas ocultas a la derecha (desplazamiento hacia el pasado)
 
   List<double?> _l(String k) => ((d[k] as List?) ?? [])
       .map((e) => e is num ? e.toDouble() : null)
@@ -164,14 +171,16 @@ class _CandleChart extends CustomPainter {
     final dates = ((d['d'] as List?) ?? []).map((e) => e.toString()).toList();
     final total = c.length;
     if (total < 2) return;
-    final start = math.max(0, total - n);
-    final cnt = total - start;
+    final end =
+        (total - off).clamp(2, total).toInt(); // última vela visible (excluida)
+    final start = math.max(0, end - n);
+    final cnt = end - start;
     const right = 64.0, bottom = 20.0;
     final w = size.width - right;
     final volH = (size.height - bottom) * 0.16;
     final ph = size.height - bottom - volH - 6;
     var mn = double.infinity, mx = -double.infinity;
-    for (var i = start; i < total; i++) {
+    for (var i = start; i < end; i++) {
       if (lo[i] != null) mn = math.min(mn, lo[i]!);
       if (h[i] != null) mx = math.max(mx, h[i]!);
     }
@@ -207,11 +216,11 @@ class _CandleChart extends CustomPainter {
     }
     // volumen
     var vmax = 0.0;
-    for (var i = start; i < total; i++) {
+    for (var i = start; i < end; i++) {
       vmax = math.max(vmax, v[i] ?? 0.0);
     }
     final vTop = ph + 6;
-    for (var i = start; i < total; i++) {
+    for (var i = start; i < end; i++) {
       final x = (i - start) * step;
       final up = (c[i] ?? 0) >= (o[i] ?? 0);
       if (vmax > 0 && v[i] != null) {
@@ -242,7 +251,7 @@ class _CandleChart extends CustomPainter {
       if (e.length != total) return;
       final path = Path();
       var started = false;
-      for (var i = start; i < total; i++) {
+      for (var i = start; i < end; i++) {
         if (e[i] == null) continue;
         final pt = Offset((i - start) * step + step / 2, y(e[i]!));
         if (!started) {
@@ -287,7 +296,7 @@ class _CandleChart extends CustomPainter {
     hline(entry, const Color(0xFF2E5FA8), 'Ent');
     hline(stop, _kRedFill, 'Stop');
     // fechas
-    for (final i in [start, start + cnt ~/ 2, total - 1]) {
+    for (final i in [start, start + cnt ~/ 2, end - 1]) {
       if (i >= dates.length) continue;
       final t = tp(_fmtDate(dates[i]), _cMuted);
       final x = ((i - start) * step + step / 2 - t.width / 2)
@@ -302,7 +311,7 @@ class _CandleChart extends CustomPainter {
         hv.dx > w ||
         hv.dy < 0 ||
         hv.dy > size.height - bottom) return;
-    final i = (start + (hv.dx / step).floor()).clamp(start, total - 1).toInt();
+    final i = (start + (hv.dx / step).floor()).clamp(start, end - 1).toInt();
     final cx = (i - start) * step + step / 2;
     final cross = Paint()
       ..color = _cText.withAlpha(140)
@@ -391,7 +400,8 @@ class _CandleChart extends CustomPainter {
       old.entry != entry ||
       old.stop != stop ||
       old.target != target ||
-      old.hover != hover;
+      old.hover != hover ||
+      old.off != off;
 }
 
 /// Gráfico con cruz: ratón (pasar por encima) o dedo (tocar / mantener y arrastrar).
@@ -399,41 +409,179 @@ class _CandleChartView extends StatefulWidget {
   const _CandleChartView(
       {required this.d, required this.n, this.entry, this.stop, this.target});
   final Map<String, dynamic> d;
-  final int n;
+  final int n; // velas visibles iniciales (botones 3M / 6M / 1A)
   final double? entry, stop, target;
 
   @override
   State<_CandleChartView> createState() => _CandleChartViewState();
 }
 
+/// Cruz (ratón o dedo), zoom (pellizco, rueda, trackpad o botones) y desplazamiento
+/// por el histórico (dos dedos, Mayús + rueda o flechas).
 class _CandleChartViewState extends State<_CandleChartView> {
   Offset? _hover;
+  late int _n = widget.n;
+  int _off = 0; // velas ocultas a la derecha
+  final Map<int, Offset> _ptrs = {}; // dedos en pantalla (para el pellizco)
+  double? _pinchDist;
+  double? _pinchX;
+  int _pinchN = 0;
+  int _pinchOff = 0;
+
+  int get _total => ((widget.d['c'] as List?) ?? const []).length;
+
+  @override
+  void didUpdateWidget(covariant _CandleChartView old) {
+    super.didUpdateWidget(old);
+    if (old.n != widget.n) {
+      _n = widget.n;
+      _off = 0;
+    }
+  }
 
   void _set(Offset? p) => setState(() => _hover = p);
 
+  void _apply(int n, int off) {
+    final tot = math.max(2, _total);
+    final nn = n.clamp(10, tot).toInt();
+    setState(() {
+      _n = nn;
+      _off = off.clamp(0, math.max(0, tot - nn)).toInt();
+    });
+  }
+
+  /// Zoom alrededor de un punto: factor > 1 acerca (menos velas).
+  void _zoom(double factor, double? atX, double width) {
+    final newN = (_n / factor).round();
+    if (atX == null || width <= 0) {
+      _apply(newN, _off);
+      return;
+    }
+    // mantiene la vela bajo el cursor en su sitio
+    final frac = (atX / width).clamp(0.0, 1.0);
+    final end = _total - _off;
+    final atIdx = end - _n + frac * _n;
+    final newEnd = (atIdx + (1 - frac) * newN).round();
+    _apply(newN, _total - newEnd);
+  }
+
+  void _pan(int bars) => _apply(_n, _off + bars);
+
+  double _dist() {
+    final p = _ptrs.values.toList();
+    return (p[0] - p[1]).distance;
+  }
+
+  Widget _btn(IconData i, String tip, VoidCallback f) => IconButton(
+        tooltip: tip,
+        visualDensity: VisualDensity.compact,
+        iconSize: 18,
+        color: _cMuted,
+        icon: Icon(i),
+        onPressed: f,
+      );
+
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.precise,
-      onHover: (e) => _set(e.localPosition),
-      onExit: (_) => _set(null),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapDown: (e) => _set(e.localPosition),
-        onLongPressStart: (e) => _set(e.localPosition),
-        onLongPressMoveUpdate: (e) => _set(e.localPosition),
-        onHorizontalDragStart: (e) => _set(e.localPosition),
-        onHorizontalDragUpdate: (e) => _set(e.localPosition),
-        child: CustomPaint(
-          size: Size.infinite,
-          painter: _CandleChart(widget.d, widget.n,
-              entry: widget.entry,
-              stop: widget.stop,
-              target: widget.target,
-              hover: _hover),
+    return LayoutBuilder(builder: (context, cons) {
+      final w =
+          math.max(1.0, cons.maxWidth - 64); // ancho de las velas (sin el eje)
+      final chart = Listener(
+        onPointerDown: (e) {
+          _ptrs[e.pointer] = e.localPosition;
+          if (_ptrs.length == 2) {
+            _pinchDist = _dist();
+            _pinchX = (_ptrs.values.first.dx + _ptrs.values.last.dx) / 2;
+            _pinchN = _n;
+            _pinchOff = _off;
+          }
+        },
+        onPointerMove: (e) {
+          if (!_ptrs.containsKey(e.pointer)) return;
+          _ptrs[e.pointer] = e.localPosition;
+          if (_ptrs.length == 2 && _pinchDist != null && _pinchDist! > 0) {
+            final cx = (_ptrs.values.first.dx + _ptrs.values.last.dx) / 2;
+            final scale = _dist() / _pinchDist!;
+            final newN = (_pinchN / scale).round();
+            // desplazamiento con los dos dedos
+            final barsMoved = ((cx - _pinchX!) / (w / _pinchN)).round();
+            final frac = (_pinchX! / w).clamp(0.0, 1.0);
+            final end0 = _total - _pinchOff;
+            final atIdx = end0 - _pinchN + frac * _pinchN;
+            final newEnd = (atIdx + (1 - frac) * newN).round() - barsMoved;
+            _apply(newN, _total - newEnd);
+          }
+        },
+        onPointerUp: (e) {
+          _ptrs.remove(e.pointer);
+          if (_ptrs.length < 2) _pinchDist = null;
+        },
+        onPointerCancel: (e) {
+          _ptrs.remove(e.pointer);
+          if (_ptrs.length < 2) _pinchDist = null;
+        },
+        onPointerSignal: (e) {
+          if (e is PointerScrollEvent) {
+            final dx = e.scrollDelta.dx, dy = e.scrollDelta.dy;
+            final shift = HardwareKeyboard.instance.isShiftPressed;
+            if (shift || dx.abs() > dy.abs()) {
+              final v = shift ? dy : dx;
+              _pan((v / (w / _n)).round().clamp(-30, 30).toInt());
+            } else if (dy != 0) {
+              _zoom(dy < 0 ? 1.15 : 1 / 1.15, e.localPosition.dx, w);
+            }
+          }
+        },
+        onPointerPanZoomUpdate: (e) {
+          // trackpad: pellizco = zoom, dos dedos en horizontal = desplazar
+          if ((e.scale - 1).abs() > 0.01) {
+            _zoom(e.scale > 1 ? 1.04 : 1 / 1.04, e.localPosition.dx, w);
+          } else if (e.panDelta.dx.abs() > 2) {
+            _pan((-e.panDelta.dx / (w / _n)).round());
+          }
+        },
+        child: MouseRegion(
+          cursor: SystemMouseCursors.precise,
+          onHover: (e) => _set(e.localPosition),
+          onExit: (_) => _set(null),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (e) => _set(e.localPosition),
+            onLongPressStart: (e) => _set(e.localPosition),
+            onLongPressMoveUpdate: (e) => _set(e.localPosition),
+            onHorizontalDragStart: (e) {
+              if (_ptrs.length < 2) _set(e.localPosition);
+            },
+            onHorizontalDragUpdate: (e) {
+              if (_ptrs.length < 2) _set(e.localPosition);
+            },
+            child: CustomPaint(
+              size: Size.infinite,
+              painter: _CandleChart(widget.d, _n,
+                  entry: widget.entry,
+                  stop: widget.stop,
+                  target: widget.target,
+                  hover: _ptrs.length >= 2 ? null : _hover,
+                  off: _off),
+            ),
+          ),
         ),
-      ),
-    );
+      );
+      return Column(children: [
+        Expanded(child: chart),
+        Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+          Text('$_n velas',
+              style: const TextStyle(fontSize: 11.5, color: _cMuted)),
+          _btn(Icons.chevron_left, 'Más atrás en el tiempo',
+              () => _pan((_n / 4).round())),
+          _btn(Icons.chevron_right, 'Más reciente',
+              () => _pan(-(_n / 4).round())),
+          _btn(Icons.zoom_out, 'Alejar', () => _zoom(1 / 1.4, null, w)),
+          _btn(Icons.zoom_in, 'Acercar', () => _zoom(1.4, null, w)),
+          _btn(Icons.restart_alt, 'Restablecer', () => _apply(widget.n, 0)),
+        ]),
+      ]);
+    });
   }
 }
 
@@ -2402,6 +2550,7 @@ class _HomeState extends State<_Home> {
     final uid = _uid;
     if (uid == null) return;
     try {
+      _chartCands = _computeChartCands(); // con los filtros actuales
       await cf.FirebaseFirestore.instance.collection('users').doc(uid).set({
         'data': jsonEncode(_settingsJson()),
         'updated_ms': DateTime.now().millisecondsSinceEpoch,
@@ -2622,19 +2771,27 @@ class _HomeState extends State<_Home> {
 
   /// Valores que pasan los filtros duros en Largos y en Cortos (hasta 120): el job
   /// guarda su gráfico cada noche junto con favoritos y cartera.
-  void _updateChartCands() {
+  /// Lista para los gráficos offline: los valores que salen con tus filtros en Largos y
+  /// en Cortos (hasta 120 de cada uno, en el orden de la tabla) + los mejores candidatos.
+  List<String> _computeChartCands() {
+    if (_rows.isEmpty) return _chartCands;
     final cur = _mode;
     final out = <String>[];
     for (final m in const ['long', 'short']) {
       _mode = m;
       _computePlans();
+      out.addAll(_visible().take(120).map((r) => r['ticker'].toString()));
       final ok = _rows.where((r) => r['swing_ok'] == true).toList()
         ..sort((a, b) => _cmp(a['score'], b['score'], false));
-      out.addAll(ok.take(60).map((r) => r['ticker'].toString()));
+      out.addAll(ok.take(40).map((r) => r['ticker'].toString()));
     }
     _mode = cur;
     _computePlans();
-    final l = out.toSet().toList()..sort();
+    return out.toSet().toList()..sort();
+  }
+
+  void _updateChartCands() {
+    final l = _computeChartCands();
     if (l.join(',') != _chartCands.join(',')) {
       _chartCands = l;
       _schedulePush();
@@ -6858,12 +7015,16 @@ class _DetailState extends State<_Detail> {
                 'Authorization': 'Bearer $token',
                 'Content-Type': 'application/json'
               },
-              body: jsonEncode({'ticker': t}))
+              body: jsonEncode({'ticker': t, 'chart': true}))
           .timeout(const Duration(seconds: 60));
       final body = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
       if (!mounted) return;
       setState(() {
         _infoLoading = false;
+        // Gráfico generado (o actualizado) por la función: queda guardado para usarlo sin conexión
+        if (body['chart'] is Map) {
+          _chart = Map<String, dynamic>.from(body['chart'] as Map);
+        }
         if (body['status'] == 'ok') {
           _info = body;
         } else {
@@ -7265,12 +7426,19 @@ class _DetailState extends State<_Detail> {
   Widget _chartSection() {
     if (_chartLoading) return const SizedBox.shrink();
     final d = _chart;
+    if (d == null && _infoLoading) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 16),
+        child: Text('Cargando gráfico…',
+            style: TextStyle(fontSize: 12.5, color: _cMuted)),
+      );
+    }
     if (d == null) {
       return const Padding(
         padding: EdgeInsets.only(top: 16),
         child: Text(
-            'Sin gráfico guardado para este valor: se guardan los de favoritos, cartera y los que '
-            'pasan los filtros duros (se actualizan cada noche). Usa «Ver en TradingView».',
+            'No hay gráfico para este valor (sin conexión o sin datos en Yahoo). '
+            'Usa «Ver en TradingView».',
             style: TextStyle(fontSize: 12.5, color: _cMuted)),
       );
     }
@@ -7322,7 +7490,7 @@ class _DetailState extends State<_Detail> {
       ]),
       const SizedBox(height: 6),
       SizedBox(
-        height: 320,
+        height: 360,
         child: _CandleChartView(
             d: d,
             n: _chartN,
