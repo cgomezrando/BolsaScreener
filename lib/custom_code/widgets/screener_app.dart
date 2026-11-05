@@ -44,10 +44,14 @@ const Color _kRedFill = Color(0xFFB33A34);
 const Color _kStar = Color(0xFFF5C451);
 const Color _kAmber = Color(0xFFE0A93B);
 const Color _kEdit = Color(0xFF5B9BFF); // valores editables (entrada y stop)
-const Color _kEma20 = Color(0xFF5B9BFF);
-const Color _kEma50 = Color(0xFFE0A93B);
-const Color _kEma100 = Color(0xFF3FC9B4);
-const Color _kEma200 = Color(0xFFB07CFF);
+const Color _kEma20 = Color(0xFF3FC97E); // verde
+const Color _kEma50 = Color(0xFFF2D04B); // amarillo
+const Color _kEma100 = Color(0xFFF08C2E); // naranja
+const Color _kEma200 = Color(0xFFE5534B); // rojo
+// Líneas del plan en el gráfico (distintas de las EMAs)
+const Color _kLineEntry = Color(0xFF4C8DFF); // azul
+const Color _kLineTarget = Color(0xFF22C3E6); // cian
+const Color _kLineStop = Color(0xFFD946EF); // magenta
 
 // Cloud Function que lanza el job en modo intradía (botón "Actualizar ahora").
 const String _kRefreshUrl =
@@ -266,7 +270,7 @@ class _CandleChart extends CustomPainter {
           Paint()
             ..color = col
             ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.6);
+            ..strokeWidth = 1.0);
     }
 
     line('e20', _kEma20);
@@ -292,9 +296,9 @@ class _CandleChart extends CustomPainter {
       t.paint(canvas, Offset(w + 4, yy - t.height / 2));
     }
 
-    hline(target, _kGreenFill, 'Obj');
-    hline(entry, const Color(0xFF2E5FA8), 'Ent');
-    hline(stop, _kRedFill, 'Stop');
+    hline(target, _kLineTarget, 'Obj');
+    hline(entry, _kLineEntry, 'Ent');
+    hline(stop, _kLineStop, 'Stop');
     // fechas
     for (final i in [start, start + cnt ~/ 2, end - 1]) {
       if (i >= dates.length) continue;
@@ -877,6 +881,8 @@ List<_Field> _buildFields() {
   t('name', 'Empresa', _cId, w: 140);
   ch('sector', 'Sector', _cId, w: 150);
   ch('ind_name', 'Industria', _cId, w: 150);
+  ch('chart_off', 'Gráfico offline (fecha de la última vela guardada)', _cId,
+      w: 100, h: 'Gráfico offline');
   b('in_spx', 'En S&P 500', _cId);
   b('in_ndx', 'En Nasdaq-100', _cId);
   b('in_dow', 'En Dow Jones', _cId);
@@ -2369,6 +2375,8 @@ class _HomeState extends State<_Home> {
   final Map<String, String> _sortKey = {'long': 'r_3m', 'short': 'r_3m'};
   final Map<String, bool> _sortAsc = {'long': false, 'short': true};
   List<_Preset> _userPresets = [];
+  Set<String> _presetDel =
+      {}; // presets borrados ('modo|nombre'): no reaparecen al sincronizar
   String _search = '';
   double _risk = 1000;
   double _maxPos = 50000;
@@ -2452,6 +2460,7 @@ class _HomeState extends State<_Home> {
           for (final m in ['long', 'short']) m: _favs[m]!.toList()
         },
         'presets': _userPresets.map((e) => e.toJson()).toList(),
+        'presetsDel': _presetDel.toList(),
         'filters': {
           for (final m in ['long', 'short'])
             m: _filters[m]!.map((e) => e.toJson()).toList()
@@ -2501,7 +2510,10 @@ class _HomeState extends State<_Home> {
       final rp = (j['presets'] as List?)
           ?.map((e) => _Preset.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList();
+      final pd = (j['presetsDel'] as List?)?.map((e) => e.toString()).toSet();
+      if (pd != null) _presetDel = {..._presetDel, ...pd};
       if (rp != null) {
+        rp.removeWhere((p) => _presetDel.contains('${p.mode}|${p.name}'));
         if (mergeLocal) {
           final names = rp.map((p) => '${p.mode}|${p.name}').toSet();
           _userPresets = [
@@ -2626,6 +2638,7 @@ class _HomeState extends State<_Home> {
         final sa = p.getBool('scr_a_$m');
         if (sa != null) _sortAsc[m] = sa;
       }
+      _presetDel = (p.getStringList('scr_presets_del') ?? []).toSet();
       final ps = p.getString('scr_presets');
       if (ps != null) {
         _userPresets = (jsonDecode(ps) as List)
@@ -2691,6 +2704,7 @@ class _HomeState extends State<_Home> {
       }
       p.setString('scr_presets',
           jsonEncode(_userPresets.map((e) => e.toJson()).toList()));
+      p.setStringList('scr_presets_del', _presetDel.toList());
       p.setDouble('scr_risk', _risk);
       p.setDouble('scr_maxpos', _maxPos);
       p.setString('scr_hard', jsonEncode(_rulesToJson()));
@@ -2826,11 +2840,31 @@ class _HomeState extends State<_Home> {
 
   /// En la app instalada, descarga los gráficos guardados para tenerlos sin conexión
   /// (Firestore los conserva en el dispositivo).
+  Map<String, String> _chartDates =
+      {}; // ticker -> fecha de la última vela guardada
+
+  void _applyChartDates() {
+    for (final r in _rows) {
+      final d = _chartDates[r['ticker']?.toString()];
+      r['chart_off'] = d == null ? null : _fmtDate(d);
+    }
+  }
+
   Future<void> _prefetchCharts() async {
-    if (kIsWeb) return;
     try {
       final db = cf.FirebaseFirestore.instance;
       final meta = await db.collection('screener_meta').doc('charts').get();
+      final dm = (meta.data()?['dates'] as Map?) ?? {};
+      if (mounted) {
+        setState(() {
+          _chartDates = {
+            for (final e in dm.entries)
+              if (e.value != null) e.key.toString(): e.value.toString()
+          };
+          _applyChartDates();
+        });
+      }
+      if (kIsWeb) return; // sin conexión solo en la app instalada
       final ts = ((meta.data()?['tickers'] as List?) ?? [])
           .map((e) => e.toString())
           .toList();
@@ -4314,8 +4348,10 @@ class _HomeState extends State<_Home> {
       )),
     );
     if (name == null) return;
-    set(() =>
-        _userPresets.removeWhere((p) => p.mode == _mode && p.name == name));
+    set(() {
+      _userPresets.removeWhere((p) => p.mode == _mode && p.name == name);
+      _presetDel.add('$_mode|$name');
+    });
     _save();
   }
 
@@ -5037,6 +5073,7 @@ class _HomeState extends State<_Home> {
           if (name == null || name.trim().isEmpty) return;
           final nm = name.trim();
           set(() {
+            _presetDel.remove('$_mode|$nm');
             _userPresets.removeWhere((p) => p.mode == _mode && p.name == nm);
             _userPresets.add(_Preset(
               nm,
@@ -5052,6 +5089,36 @@ class _HomeState extends State<_Home> {
         }
         if (v == '__del') {
           await _deletePresetDialog(set);
+          return;
+        }
+        if (v.startsWith('x:')) {
+          final p = us[int.tryParse(v.substring(2)) ?? 0];
+          final ok = await showDialog<bool>(
+            context: context,
+            builder: (c) => _themed(AlertDialog(
+              backgroundColor: _cPanel,
+              title: const Text('Borrar preset'),
+              content: Text('¿Borrar el preset «${p.name}»?'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(c, false),
+                    child: const Text('Cancelar')),
+                FilledButton(
+                    style: _fillStyle(_kRedFill),
+                    onPressed: () => Navigator.pop(c, true),
+                    child: const Text('Borrar')),
+              ],
+            )),
+          );
+          if (ok == true) {
+            set(() {
+              _userPresets
+                  .removeWhere((q) => q.mode == _mode && q.name == p.name);
+              _presetDel.add('$_mode|${p.name}');
+            });
+            _save();
+            _toast('Preset «${p.name}» borrado');
+          }
           return;
         }
         final idx = int.tryParse(v.substring(2)) ?? 0;
@@ -5070,6 +5137,13 @@ class _HomeState extends State<_Home> {
                 Icon(Icons.star_outline, size: 16, color: _accent),
                 const SizedBox(width: 8),
                 Expanded(child: Text(us[i].name)),
+                IconButton(
+                  tooltip: 'Borrar este preset',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.delete_outline,
+                      size: 18, color: _cMuted),
+                  onPressed: () => Navigator.pop(ctx, 'x:$i'),
+                ),
               ],
             ),
           ),
@@ -7055,6 +7129,11 @@ class _DetailState extends State<_Detail> {
         // Gráfico generado (o actualizado) por la función: queda guardado para usarlo sin conexión
         if (body['chart'] is Map) {
           _chart = Map<String, dynamic>.from(body['chart'] as Map);
+          final dl = _chart!['d'];
+          if (dl is List && dl.isNotEmpty) {
+            widget.row['chart_off'] =
+                _fmtDate(dl.last.toString()); // columna «Gráfico offline»
+          }
         }
         if (body['status'] == 'ok') {
           _info = body;
@@ -7515,13 +7594,13 @@ class _DetailState extends State<_Detail> {
         leg(_kEma50, 'EMA50'),
         leg(_kEma100, 'EMA100'),
         leg(_kEma200, 'EMA200'),
-        leg(const Color(0xFF2E5FA8), 'Entrada'),
-        leg(_kRedFill, 'Stop'),
-        leg(_kGreenFill, 'Objetivo'),
+        leg(_kLineEntry, 'Entrada'),
+        leg(_kLineStop, 'Stop'),
+        leg(_kLineTarget, 'Objetivo'),
       ]),
       const SizedBox(height: 6),
       SizedBox(
-        height: 360,
+        height: 700,
         child: _CandleChartView(
             d: d,
             n: _chartN,
