@@ -2348,6 +2348,8 @@ class _HomeState extends State<_Home> {
   String? _jobBaseline;
   Timer? _jobPoll;
   Timer? _jobTick;
+  StreamSubscription? _latestSub; // vigila si hay datos nuevos guardados
+  bool _newData = false;
 
   String _mode = 'long';
   int _tab = 0;
@@ -2383,6 +2385,7 @@ class _HomeState extends State<_Home> {
 
   @override
   void dispose() {
+    _latestSub?.cancel();
     _liveTimer?.cancel();
     _jobPoll?.cancel();
     _jobTick?.cancel();
@@ -2409,6 +2412,28 @@ class _HomeState extends State<_Home> {
     _riskCtl.text = _plain(_risk);
     _maxCtl.text = _plain(_maxPos);
     await _load();
+    _watchLatest();
+  }
+
+  /// Avisa cuando hay un snapshot nuevo guardado (job de las 22:30 o nube lanzada en
+  /// otro dispositivo). Si la nube se lanzó aquí, la recarga ya es automática.
+  void _watchLatest() {
+    _latestSub?.cancel();
+    try {
+      _latestSub = cf.FirebaseFirestore.instance
+          .collection('screener')
+          .doc('latest')
+          .snapshots()
+          .listen((d) {
+        final u = (d.data()?['updated_iso'] ?? '').toString();
+        if (!mounted ||
+            u.isEmpty ||
+            _updatedIso.isEmpty ||
+            _loading ||
+            _jobRunning) return;
+        if (u != _updatedIso && !_newData) setState(() => _newData = true);
+      }, onError: (_) {});
+    } catch (_) {}
   }
 
   // ---------------------------------------------------- sincronización por usuario
@@ -2742,6 +2767,7 @@ class _HomeState extends State<_Home> {
         _asof = (j['asof'] ?? '').toString();
         _snapMode = (j['mode'] ?? 'close').toString();
         _updatedIso = (j['updated'] ?? '').toString();
+        _newData = false;
         _loading = false;
       });
       await _loadPortfolio();
@@ -4728,11 +4754,16 @@ class _HomeState extends State<_Home> {
             color: _jobRunning ? _cMuted : _cText),
         onPressed: (_loading || _jobRunning) ? null : _runNow,
       ),
-      IconButton(
-        tooltip: 'Recargar datos guardados',
-        icon: const Icon(Icons.refresh, color: _cText),
-        onPressed: _loading ? null : _refreshAll,
-      ),
+      if (_newData)
+        Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: FilledButton.icon(
+            style: _fillStyle(const Color(0xFF2E5FA8)),
+            onPressed: _loading ? null : _refreshAll,
+            icon: const Icon(Icons.download, size: 18),
+            label: const Text('Datos nuevos · Cargar'),
+          ),
+        ),
       Container(width: 1, height: 28, color: _cBorder),
       const SizedBox(width: 6),
       TextButton.icon(
