@@ -43,6 +43,10 @@ const Color _kRedFill = Color(0xFFB33A34);
 const Color _kStar = Color(0xFFF5C451);
 const Color _kAmber = Color(0xFFE0A93B);
 const Color _kEdit = Color(0xFF5B9BFF); // valores editables (entrada y stop)
+const Color _kEma20 = Color(0xFF5B9BFF);
+const Color _kEma50 = Color(0xFFE0A93B);
+const Color _kEma100 = Color(0xFF3FC9B4);
+const Color _kEma200 = Color(0xFFB07CFF);
 
 // Cloud Function que lanza el job en modo intradía (botón "Actualizar ahora").
 const String _kRefreshUrl =
@@ -136,6 +140,301 @@ Future<void> _openTradingView(String ticker) async {
     } catch (_) {}
   }
   await launchUrl(uri, mode: LaunchMode.externalApplication);
+}
+
+// ----------------------------------------------------------------- gráfico de velas
+
+class _CandleChart extends CustomPainter {
+  _CandleChart(this.d, this.n,
+      {this.entry, this.stop, this.target, this.cur = '', this.hover});
+  final Map<String, dynamic> d;
+  final int n; // velas a mostrar
+  final double? entry, stop, target;
+  final String cur;
+  final Offset? hover; // posición del cursor / dedo (cruz con valores)
+
+  List<double?> _l(String k) => ((d[k] as List?) ?? [])
+      .map((e) => e is num ? e.toDouble() : null)
+      .toList();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final o = _l('o'), h = _l('h'), lo = _l('l'), c = _l('c');
+    final v = _l('v');
+    final dates = ((d['d'] as List?) ?? []).map((e) => e.toString()).toList();
+    final total = c.length;
+    if (total < 2) return;
+    final start = math.max(0, total - n);
+    final cnt = total - start;
+    const right = 64.0, bottom = 20.0;
+    final w = size.width - right;
+    final volH = (size.height - bottom) * 0.16;
+    final ph = size.height - bottom - volH - 6;
+    var mn = double.infinity, mx = -double.infinity;
+    for (var i = start; i < total; i++) {
+      if (lo[i] != null) mn = math.min(mn, lo[i]!);
+      if (h[i] != null) mx = math.max(mx, h[i]!);
+    }
+    for (final x in [entry, stop, target]) {
+      if (x != null && x > 0 && x < mx * 1.25 && x > mn * 0.75) {
+        mn = math.min(mn, x);
+        mx = math.max(mx, x);
+      }
+    }
+    if (!mn.isFinite || mx <= mn) return;
+    final pad = (mx - mn) * 0.04;
+    mn -= pad;
+    mx += pad;
+    double y(double p) => ph - (p - mn) / (mx - mn) * ph;
+    final step = w / cnt;
+    final grid = Paint()
+      ..color = _cDivider
+      ..strokeWidth = 1;
+    TextPainter tp(String t, Color col,
+            {double fs = 10.5, FontWeight fw = FontWeight.w400}) =>
+        TextPainter(
+            text: TextSpan(
+                text: t,
+                style: TextStyle(fontSize: fs, color: col, fontWeight: fw)),
+            textDirection: ui.TextDirection.ltr)
+          ..layout();
+    for (var g = 0; g <= 4; g++) {
+      final p = mn + (mx - mn) * g / 4;
+      final yy = y(p);
+      canvas.drawLine(Offset(0, yy), Offset(w, yy), grid);
+      final t = tp(_num(p, p >= 100 ? 0 : 2), _cMuted);
+      t.paint(canvas, Offset(w + 6, yy - t.height / 2));
+    }
+    // volumen
+    var vmax = 0.0;
+    for (var i = start; i < total; i++) {
+      vmax = math.max(vmax, v[i] ?? 0.0);
+    }
+    final vTop = ph + 6;
+    for (var i = start; i < total; i++) {
+      final x = (i - start) * step;
+      final up = (c[i] ?? 0) >= (o[i] ?? 0);
+      if (vmax > 0 && v[i] != null) {
+        final vh = volH * v[i]! / vmax;
+        canvas.drawRect(
+            Rect.fromLTWH(x + step * 0.15, vTop + volH - vh, step * 0.7, vh),
+            Paint()..color = (up ? _kGreen : _kRed).withAlpha(70));
+      }
+      if (o[i] == null || c[i] == null || h[i] == null || lo[i] == null)
+        continue;
+      final col = up ? _kGreen : _kRed;
+      final cx = x + step / 2;
+      canvas.drawLine(
+          Offset(cx, y(h[i]!)),
+          Offset(cx, y(lo[i]!)),
+          Paint()
+            ..color = col
+            ..strokeWidth = 1);
+      final top = y(math.max(o[i]!, c[i]!)), bot = y(math.min(o[i]!, c[i]!));
+      canvas.drawRect(
+          Rect.fromLTWH(x + step * 0.15, top, math.max(1.0, step * 0.7),
+              math.max(1.0, bot - top)),
+          Paint()..color = col);
+    }
+    // medias
+    void line(String k, Color col) {
+      final e = _l(k);
+      if (e.length != total) return;
+      final path = Path();
+      var started = false;
+      for (var i = start; i < total; i++) {
+        if (e[i] == null) continue;
+        final pt = Offset((i - start) * step + step / 2, y(e[i]!));
+        if (!started) {
+          path.moveTo(pt.dx, pt.dy);
+          started = true;
+        } else {
+          path.lineTo(pt.dx, pt.dy);
+        }
+      }
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = col
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.6);
+    }
+
+    line('e20', _kEma20);
+    line('e50', _kEma50);
+    line('e100', _kEma100);
+    line('e200', _kEma200);
+    // entrada, stop y objetivo
+    void hline(double? p, Color col, String label) {
+      if (p == null || p < mn || p > mx) return;
+      final yy = y(p);
+      final paint = Paint()
+        ..color = col
+        ..strokeWidth = 1.3;
+      for (var x = 0.0; x < w; x += 8) {
+        canvas.drawLine(Offset(x, yy), Offset(math.min(x + 4, w), yy), paint);
+      }
+      final t =
+          tp('$label ${_num(p, 2)}', Colors.white, fs: 10, fw: FontWeight.w600);
+      final r =
+          Rect.fromLTWH(w + 2, yy - t.height / 2 - 2, right - 2, t.height + 4);
+      canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(3)),
+          Paint()..color = col);
+      t.paint(canvas, Offset(w + 4, yy - t.height / 2));
+    }
+
+    hline(target, _kGreenFill, 'Obj');
+    hline(entry, const Color(0xFF2E5FA8), 'Ent');
+    hline(stop, _kRedFill, 'Stop');
+    // fechas
+    for (final i in [start, start + cnt ~/ 2, total - 1]) {
+      if (i >= dates.length) continue;
+      final t = tp(_fmtDate(dates[i]), _cMuted);
+      final x = ((i - start) * step + step / 2 - t.width / 2)
+          .clamp(0.0, w - t.width)
+          .toDouble();
+      t.paint(canvas, Offset(x, size.height - bottom + 5));
+    }
+    // ---- cruz: vela bajo el cursor, fecha en el eje inferior y precio en el derecho
+    final hv = hover;
+    if (hv == null ||
+        hv.dx < 0 ||
+        hv.dx > w ||
+        hv.dy < 0 ||
+        hv.dy > size.height - bottom) return;
+    final i = (start + (hv.dx / step).floor()).clamp(start, total - 1).toInt();
+    final cx = (i - start) * step + step / 2;
+    final cross = Paint()
+      ..color = _cText.withAlpha(140)
+      ..strokeWidth = 1;
+    for (var yy = 0.0; yy < size.height - bottom; yy += 6) {
+      canvas.drawLine(Offset(cx, yy),
+          Offset(cx, math.min(yy + 3, size.height - bottom)), cross);
+    }
+    if (hv.dy <= ph) {
+      for (var xx = 0.0; xx < w; xx += 6) {
+        canvas.drawLine(
+            Offset(xx, hv.dy), Offset(math.min(xx + 3, w), hv.dy), cross);
+      }
+      final pAt = mn + (ph - hv.dy) / ph * (mx - mn);
+      final t = tp(_num(pAt, 2), Colors.black, fs: 10.5, fw: FontWeight.w700);
+      final r = Rect.fromLTWH(
+          w + 2, hv.dy - t.height / 2 - 2, right - 2, t.height + 4);
+      canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(3)),
+          Paint()..color = _cText);
+      t.paint(canvas, Offset(w + 4, hv.dy - t.height / 2));
+    }
+    if (i < dates.length) {
+      final t =
+          tp(_fmtDate(dates[i]), Colors.black, fs: 10.5, fw: FontWeight.w700);
+      final bx = (cx - t.width / 2 - 4).clamp(0.0, w - t.width - 8).toDouble();
+      final r = Rect.fromLTWH(
+          bx, size.height - bottom + 2, t.width + 8, t.height + 4);
+      canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(3)),
+          Paint()..color = _cText);
+      t.paint(canvas, Offset(bx + 4, size.height - bottom + 4));
+    }
+    // recuadro con los valores de la vela
+    String f(double? x) => x == null ? '–' : _num(x, 2);
+    final e20 = _l('e20'),
+        e50 = _l('e50'),
+        e100 = _l('e100'),
+        e200 = _l('e200');
+    double? at(List<double?> l) => i < l.length ? l[i] : null;
+    final chg = (i > 0 && c[i] != null && c[i - 1] != null && c[i - 1]! > 0)
+        ? (c[i]! / c[i - 1]! - 1) * 100
+        : null;
+    final vol = v[i];
+    final spans = <TextSpan>[
+      TextSpan(
+          text: '${i < dates.length ? _fmtDate(dates[i]) : ''}   ',
+          style: const TextStyle(fontWeight: FontWeight.w700, color: _cText)),
+      TextSpan(text: 'A ${f(o[i])}  M ${f(h[i])}  m ${f(lo[i])}  C ${f(c[i])}'),
+      if (chg != null)
+        TextSpan(
+            text: '  ${chg >= 0 ? '+' : ''}${_num(chg, 2)} %',
+            style: TextStyle(
+                color: chg >= 0 ? _kGreen : _kRed,
+                fontWeight: FontWeight.w600)),
+      if (vol != null) TextSpan(text: '  Vol ${_fmtBig(vol)}'),
+      const TextSpan(text: '\n'),
+      TextSpan(
+          text: 'EMA20 ${f(at(e20))}   ',
+          style: const TextStyle(color: _kEma20)),
+      TextSpan(
+          text: 'EMA50 ${f(at(e50))}   ',
+          style: const TextStyle(color: _kEma50)),
+      TextSpan(
+          text: 'EMA100 ${f(at(e100))}   ',
+          style: const TextStyle(color: _kEma100)),
+      TextSpan(
+          text: 'EMA200 ${f(at(e200))}',
+          style: const TextStyle(color: _kEma200)),
+    ];
+    final info = TextPainter(
+        text: TextSpan(
+            style:
+                const TextStyle(fontSize: 11.5, color: _cMuted, height: 1.35),
+            children: spans),
+        textDirection: ui.TextDirection.ltr)
+      ..layout(maxWidth: w - 16);
+    final box = Rect.fromLTWH(6, 4, info.width + 14, info.height + 10);
+    canvas.drawRRect(RRect.fromRectAndRadius(box, const Radius.circular(6)),
+        Paint()..color = _cPanel.withAlpha(235));
+    info.paint(canvas, const Offset(13, 9));
+  }
+
+  @override
+  bool shouldRepaint(covariant _CandleChart old) =>
+      old.d != d ||
+      old.n != n ||
+      old.entry != entry ||
+      old.stop != stop ||
+      old.target != target ||
+      old.hover != hover;
+}
+
+/// Gráfico con cruz: ratón (pasar por encima) o dedo (tocar / mantener y arrastrar).
+class _CandleChartView extends StatefulWidget {
+  const _CandleChartView(
+      {required this.d, required this.n, this.entry, this.stop, this.target});
+  final Map<String, dynamic> d;
+  final int n;
+  final double? entry, stop, target;
+
+  @override
+  State<_CandleChartView> createState() => _CandleChartViewState();
+}
+
+class _CandleChartViewState extends State<_CandleChartView> {
+  Offset? _hover;
+
+  void _set(Offset? p) => setState(() => _hover = p);
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.precise,
+      onHover: (e) => _set(e.localPosition),
+      onExit: (_) => _set(null),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (e) => _set(e.localPosition),
+        onLongPressStart: (e) => _set(e.localPosition),
+        onLongPressMoveUpdate: (e) => _set(e.localPosition),
+        onHorizontalDragStart: (e) => _set(e.localPosition),
+        onHorizontalDragUpdate: (e) => _set(e.localPosition),
+        child: CustomPaint(
+          size: Size.infinite,
+          painter: _CandleChart(widget.d, widget.n,
+              entry: widget.entry,
+              stop: widget.stop,
+              target: widget.target,
+              hover: _hover),
+        ),
+      ),
+    );
+  }
 }
 
 // ----------------------------------------------------------------- cajas alineadas
@@ -1845,6 +2144,8 @@ class _HomeState extends State<_Home> {
   double? _fx;
   Map<String, dynamic> _regime = {};
   List<Map<String, dynamic>> _macro = [];
+  List<String> _chartCands =
+      []; // candidatos (pasan filtros duros) para guardar su gráfico
   DateTime?
       _groupsLive; // hora de la última actualización al momento de Sectores e índices
   bool _showRed = false;
@@ -1992,6 +2293,7 @@ class _HomeState extends State<_Home> {
         'hard': _rulesToJson(),
         'score': _scoreToJson(),
         'pfCols': _pfCols,
+        'chart': _chartCands,
       };
 
   void _applySettings(Map<String, dynamic> j, {required bool mergeLocal}) {
@@ -2294,6 +2596,8 @@ class _HomeState extends State<_Home> {
         _loading = false;
       });
       await _loadPortfolio();
+      _updateChartCands();
+      _prefetchCharts();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -2314,6 +2618,48 @@ class _HomeState extends State<_Home> {
     }
   }
 
+  // ---------------------------------------------------- gráficos (también sin conexión)
+
+  /// Valores que pasan los filtros duros en Largos y en Cortos (hasta 120): el job
+  /// guarda su gráfico cada noche junto con favoritos y cartera.
+  void _updateChartCands() {
+    final cur = _mode;
+    final out = <String>[];
+    for (final m in const ['long', 'short']) {
+      _mode = m;
+      _computePlans();
+      final ok = _rows.where((r) => r['swing_ok'] == true).toList()
+        ..sort((a, b) => _cmp(a['score'], b['score'], false));
+      out.addAll(ok.take(60).map((r) => r['ticker'].toString()));
+    }
+    _mode = cur;
+    _computePlans();
+    final l = out.toSet().toList()..sort();
+    if (l.join(',') != _chartCands.join(',')) {
+      _chartCands = l;
+      _schedulePush();
+    }
+  }
+
+  /// En la app instalada, descarga los gráficos guardados para tenerlos sin conexión
+  /// (Firestore los conserva en el dispositivo).
+  Future<void> _prefetchCharts() async {
+    if (kIsWeb) return;
+    try {
+      final db = cf.FirebaseFirestore.instance;
+      final meta = await db.collection('screener_meta').doc('charts').get();
+      final ts = ((meta.data()?['tickers'] as List?) ?? [])
+          .map((e) => e.toString())
+          .toList();
+      for (var i = 0; i < ts.length; i += 20) {
+        await Future.wait(ts.skip(i).take(20).map((t) => db
+            .collection('screener_charts')
+            .doc(t.replaceAll('/', '_'))
+            .get()));
+      }
+    } catch (_) {}
+  }
+
   // ---------------------------------------------------- cartera IBKR
 
   Future<void> _loadPortfolio() async {
@@ -2331,7 +2677,7 @@ class _HomeState extends State<_Home> {
       final d = await cf.FirebaseFirestore.instance
           .collection('private')
           .doc('portfolio')
-          .get(const cf.GetOptions(source: cf.Source.server));
+          .get();
       final m = d.data();
       if (m != null && m['data'] is String) {
         pos = (jsonDecode(m['data'] as String) as List)
@@ -2503,6 +2849,9 @@ class _HomeState extends State<_Home> {
       final sym = m['sym'];
       if (sym is String) out.add(sym);
     }
+    for (final f in _kMacroFut) {
+      out.add(f['sym']!);
+    }
     final byT = {for (final r in _rows) r['ticker']?.toString(): r};
     for (final t in tickers) {
       final r = byT[t];
@@ -2607,6 +2956,8 @@ class _HomeState extends State<_Home> {
       for (final k in keys) {
         if (m[k] != null) g[k] = m[k];
       }
+      g['pre_pct'] =
+          m['pre_pct']; // solo ETFs de EE. UU. y solo en el pre-market
     }
 
     for (final e in _bench.entries) {
@@ -2623,6 +2974,12 @@ class _HomeState extends State<_Home> {
         final etf = (g['etf'] ?? e.key).toString();
         upd(g, etf);
         grp[e.key] = g;
+      }
+    }
+    // Futuros de los índices de EE. UU.: cotizan casi 24 h y anticipan la apertura
+    for (final f in _kMacroFut.reversed) {
+      if (!_macro.any((m) => m['sym'] == f['sym']) && refs[f['sym']] != null) {
+        _macro.insert(0, {...f});
       }
     }
     for (final row in _macro) {
@@ -2805,7 +3162,7 @@ class _HomeState extends State<_Home> {
         text: base.text,
         leading: base.leading,
         trailing: (r) => Tooltip(
-          message: 'Ver gráfico',
+          message: 'Ver en TradingView',
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => _openTradingView((r['ticker'] ?? '').toString()),
@@ -3982,7 +4339,7 @@ class _HomeState extends State<_Home> {
             ),
           ),
         Tooltip(
-          message: 'Ver gráfico',
+          message: 'Ver en TradingView',
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => _openTradingView((r['ticker'] ?? '').toString()),
@@ -4949,7 +5306,16 @@ class _HomeState extends State<_Home> {
             _openTradingView(_tvMacro[r['sym']] ?? r['sym'].toString()));
   }
 
+  static const List<Map<String, String>> _kMacroFut = [
+    {'sym': 'ES=F', 'name': 'Futuro S&P 500', 'kind': 'idx'},
+    {'sym': 'NQ=F', 'name': 'Futuro Nasdaq-100', 'kind': 'idx'},
+    {'sym': 'YM=F', 'name': 'Futuro Dow Jones', 'kind': 'idx'},
+  ];
+
   static const Map<String, String> _tvMacro = {
+    'ES=F': 'CME_MINI:ES1!',
+    'NQ=F': 'CME_MINI:NQ1!',
+    'YM=F': 'CBOT_MINI:YM1!',
     '^GSPC': 'SP:SPX',
     '^VIX': 'CBOE:VIX',
     '^IRX': 'TVC:US03MY',
@@ -5024,6 +5390,7 @@ class _HomeState extends State<_Home> {
           label: 'ETF',
           width: 60,
           text: (r) => r['_etf'].toString()),
+      pctCol('pre_pct', 'Pre-apertura %'),
       pctCol('r_1w', '1 semana %'),
       pctCol('r_1m', '1 mes %'),
       pctCol('r_3m', '3 meses %'),
@@ -6470,6 +6837,10 @@ class _DetailState extends State<_Detail> {
   late final TextEditingController _entry;
   late final String _stopSrc;
   Map<String, dynamic>? _info; // ficha: descripción, resultados, analistas
+  Map<String, dynamic>?
+      _chart; // velas guardadas por el job (también sin conexión)
+  bool _chartLoading = true;
+  int _chartN = 126; // velas visibles (6 meses)
   String? _infoErr;
   bool _infoLoading = true;
 
@@ -6868,6 +7239,99 @@ class _DetailState extends State<_Detail> {
     _stop =
         TextEditingController(text: s.toStringAsFixed(2).replaceAll('.', ','));
     _loadInfo();
+    _loadChart();
+  }
+
+  Future<void> _loadChart() async {
+    final t = (widget.row['ticker'] ?? '').toString();
+    try {
+      final d = await cf.FirebaseFirestore.instance
+          .collection('screener_charts')
+          .doc(t.replaceAll('/', '_'))
+          .get();
+      final s = d.data()?['data'];
+      if (!mounted) return;
+      setState(() {
+        _chart = s is String
+            ? Map<String, dynamic>.from(jsonDecode(s) as Map)
+            : null;
+        _chartLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _chartLoading = false);
+    }
+  }
+
+  Widget _chartSection() {
+    if (_chartLoading) return const SizedBox.shrink();
+    final d = _chart;
+    if (d == null) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 16),
+        child: Text(
+            'Sin gráfico guardado para este valor: se guardan los de favoritos, cartera y los que '
+            'pasan los filtros duros (se actualizan cada noche). Usa «Ver en TradingView».',
+            style: TextStyle(fontSize: 12.5, color: _cMuted)),
+      );
+    }
+    final last = ((d['d'] as List?) ?? []).isEmpty
+        ? ''
+        : (d['d'] as List).last.toString();
+    Widget rng(String l, int n) => Padding(
+          padding: const EdgeInsets.only(left: 6),
+          child: ChoiceChip(
+            label: Text(l),
+            selected: _chartN == n,
+            onSelected: (_) => setState(() => _chartN = n),
+            visualDensity: VisualDensity.compact,
+          ),
+        );
+    Widget leg(Color c, String t) => Padding(
+          padding: const EdgeInsets.only(right: 12),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 14, height: 3, color: c),
+            const SizedBox(width: 4),
+            Text(t, style: const TextStyle(fontSize: 12, color: _cMuted)),
+          ]),
+        );
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Padding(
+        padding: const EdgeInsets.only(top: 20, bottom: 8),
+        child: Row(children: [
+          const Text('Gráfico offline',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text('velas diarias guardadas hasta el ${_fmtDate(last)}',
+                style: const TextStyle(fontSize: 12, color: _cMuted),
+                overflow: TextOverflow.ellipsis),
+          ),
+          rng('3M', 63),
+          rng('6M', 126),
+          rng('1A', 260),
+        ]),
+      ),
+      Wrap(children: [
+        leg(_kEma20, 'EMA20'),
+        leg(_kEma50, 'EMA50'),
+        leg(_kEma100, 'EMA100'),
+        leg(_kEma200, 'EMA200'),
+        leg(const Color(0xFF2E5FA8), 'Entrada'),
+        leg(_kRedFill, 'Stop'),
+        leg(_kGreenFill, 'Objetivo'),
+      ]),
+      const SizedBox(height: 6),
+      SizedBox(
+        height: 320,
+        child: _CandleChartView(
+            d: d,
+            n: _chartN,
+            entry: _parse(_entry.text),
+            stop: _parse(_stop.text),
+            target: _d(widget.row['p_target']) ??
+                (_long ? _d(widget.row['tgt_l']) : _d(widget.row['tgt_s']))),
+      ),
+    ]);
   }
 
   @override
@@ -7210,8 +7674,8 @@ class _DetailState extends State<_Detail> {
         ),
         onPressed: _openChart,
         icon: const Icon(Icons.candlestick_chart_outlined, size: 22),
-        label: const Text('Ver gráfico',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        label: const Text('Ver en TradingView',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
       ),
     );
     if (err != null) {
@@ -7438,6 +7902,7 @@ class _DetailState extends State<_Detail> {
             const SizedBox(height: 6),
             const Text('Desliza hacia arriba para ver todos los datos.',
                 style: TextStyle(fontSize: 12, color: _cMuted)),
+            _chartSection(),
             ..._infoSections(),
             ...sections,
           ],
