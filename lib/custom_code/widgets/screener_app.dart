@@ -65,7 +65,7 @@ const String _kDetailUrl =
 const Duration _kJobPoll = Duration(seconds: 20);
 // Titular de la cartera de IBKR (solo él ve la pestaña Cartera).
 const String _kPfOwner = 'cgomezrando@gmail.com';
-const Duration _kJobTimeout = Duration(minutes: 20);
+const Duration _kJobTimeout = Duration(minutes: 35);
 
 ThemeData _darkTheme() {
   final base = ThemeData(brightness: Brightness.dark, useMaterial3: true);
@@ -302,7 +302,7 @@ class _CandleChart extends CustomPainter {
     // fechas
     for (final i in [start, start + cnt ~/ 2, end - 1]) {
       if (i >= dates.length) continue;
-      final t = tp(_fmtDate(dates[i]), _cMuted);
+      final t = tp(_fmtDateShort(dates[i]), _cMuted);
       final x = ((i - start) * step + step / 2 - t.width / 2)
           .clamp(0.0, w - t.width)
           .toDouble();
@@ -872,8 +872,8 @@ List<_Field> _buildFields() {
       f.add(_Field(k, l, c, _Kind.boolean, width: w, hdr: h));
   void ch(String k, String l, String c, {double w = 140, String? h}) =>
       f.add(_Field(k, l, c, _Kind.choice, width: w, hdr: h));
-  void t(String k, String l, String c, {double w = 90}) =>
-      f.add(_Field(k, l, c, _Kind.text, width: w));
+  void t(String k, String l, String c, {double w = 90, String? h}) =>
+      f.add(_Field(k, l, c, _Kind.text, width: w, hdr: h));
   void d(String k, String l, String c, {double w = 96, String? h}) =>
       f.add(_Field(k, l, c, _Kind.date, width: w, hdr: h));
 
@@ -902,8 +902,28 @@ List<_Field> _buildFields() {
   t('discard', 'Motivo de descarte (filtros duros)', _cPlan, w: 180);
   b('swing_ok', 'Pasa los filtros duros del swing', _cPlan,
       w: 80, h: 'Pasa filtros');
-  n('mkt_mult', 'Multiplicador de mercado', _cPlan, w: 76, h: 'Mult. mercado');
-  n('p_entry', 'Entrada (sobre máx./bajo mín. de la última sesión)', _cPlan,
+  t('score_cls', 'Clasificación por puntuación', _cPlan,
+      w: 120, h: 'Clasificación');
+  t('setup', 'Entrada preparada (nota, entrada, vela y B/R cumplen)', _cPlan,
+      w: 110, h: 'Preparada');
+  t(
+      'env',
+      'Entorno para esta dirección (índice y sector frente a su EMA50 y su pendiente)',
+      _cPlan,
+      w: 96,
+      h: 'Entorno');
+  n('sc_rs', 'Puntos: fuerza relativa', _cPlan, dec: 1, w: 70, h: 'Pts RS');
+  n('m63s', 'Fuerza relativa 3m vs sector ajustada por volatilidad (M)', _cPlan,
+      dec: 2, w: 80, h: 'RS ajust. 3m');
+  n('sc_ent', 'Puntos: entrada (distancia a la EMA20)', _cPlan,
+      dec: 1, w: 70, h: 'Pts entrada');
+  n('sc_cdl', 'Puntos: última vela', _cPlan, dec: 1, w: 70, h: 'Pts vela');
+  n('sc_vol', 'Puntos: volumen', _cPlan, dec: 1, w: 70, h: 'Pts volumen');
+  n('sc_rr', 'Puntos: beneficio/riesgo', _cPlan, dec: 1, w: 70, h: 'Pts B/R');
+  n('ent_atr', 'Distancia de la entrada a la EMA20 en ATR', _cPlan,
+      dec: 2, w: 80, h: 'Entrada a EMA20 (ATR)');
+  n('p_entry', 'Entrada (máx./mín. de la última sesión ± margen en ATR)',
+      _cPlan,
       w: 96, h: 'Entrada');
   n('p_stop', 'Stop', _cPlan, w: 96);
   n('p_stop_pct', 'Distancia al stop %', _cPlan, w: 76, h: 'Stop %');
@@ -1600,6 +1620,11 @@ const List<_RuleSpec> _kRuleSpecs = [
       help:
           'Largos: martillo. Cortos: martillo invertido (estrella). Mecha a favor ≥ 2× el cuerpo '
           'y ≥ 55 % del rango; la contraria ≤ 30 %.'),
+  _RuleSpec('touch20', 'Toque de la EMA20 en las últimas 5 velas',
+      'Ha tocado la EMA20 (5 velas)',
+      hasValue: false,
+      help:
+          'Alguna de las 5 últimas velas ha tocado o cruzado la EMA20: hay retroceso real.'),
   _RuleSpec('pre', 'Valor en contra hoy, como máximo',
       'Pre-apertura / Hoy no negativo',
       unit: '%',
@@ -1668,6 +1693,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'rsi_max': _Rule(true, 70),
         'wick': _Rule(true, 0),
         'hammer': _Rule(false, 0),
+        'touch20': _Rule(true, 0),
         'pre': _Rule(true, 0),
         'vix': _Rule(true, 25),
         'idx_pre': _Rule(true, 0),
@@ -1689,6 +1715,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'rsi_min': _Rule(true, 30),
         'wick': _Rule(false, 0),
         'hammer': _Rule(true, 0),
+        'touch20': _Rule(true, 0),
         'pre': _Rule(true, 0),
         'idx_pre': _Rule(true, 0),
         'ind_dir': _Rule(true, 0),
@@ -1778,115 +1805,161 @@ class _SpSpec {
 }
 
 const List<_SpSpec> _kSpSpecs = [
-  _SpSpec('w_rs3', 'Peso', 'Fuerza relativa 3 meses frente a su sector',
+  // Fuerza relativa ajustada por volatilidad: M = Σd / (σ(d)·√n), d = rend. log. diario del valor
+  // menos el de su referencia. Puntos = peso × percentil en el universo líquido, con el signo a favor.
+  _SpSpec('rs63s_w', 'Peso', 'Fuerza relativa ajustada por volatilidad',
       unit: 'puntos',
       dec: 0,
-      help: 'Percentil entre los valores que pasan los filtros duros.'),
-  _SpSpec('w_rs1', 'Peso', 'Fuerza relativa 1 mes frente a su índice',
+      help:
+          'M = suma de (rend. del valor − rend. de la referencia) / (desviación · √n), con rendimientos '
+          'logarítmicos diarios. Puntos = peso × percentil de M en todo el universo líquido (largos: '
+          'los más altos; cortos: los más bajos). Con M del signo contrario, 0.'),
+  _SpSpec('rs63i_w', 'Peso frente al índice (3 meses)',
+      'Fuerza relativa ajustada por volatilidad',
       unit: 'puntos', dec: 0),
-  _SpSpec('w_entry', 'Peso', 'Entrada: distancia a la EMA20 en ATR',
+  _SpSpec('rs21s_w', 'Peso frente al sector (1 mes)',
+      'Fuerza relativa ajustada por volatilidad',
+      unit: 'puntos', dec: 0),
+  _SpSpec('ent_w', 'Peso', 'Entrada: distancia a la EMA20 en ATR',
       unit: 'puntos',
       dec: 0,
-      help: 'Premia entrar cerca de la EMA20 y no estirado.'),
-  _SpSpec('entry_full', 'Puntos completos hasta',
-      'Entrada: distancia a la EMA20 en ATR',
+      help:
+          'd = (entrada − EMA20) / ATR14 en largos, al revés en cortos. Con d < 0 (entrada al otro '
+          'lado de la EMA20), 0 puntos.'),
+  _SpSpec(
+      'ent_t1', 'Todo el peso hasta', 'Entrada: distancia a la EMA20 en ATR',
       unit: 'ATR'),
-  _SpSpec('entry_mid', 'Puntos parciales hasta',
-      'Entrada: distancia a la EMA20 en ATR',
+  _SpSpec(
+      'ent_t2', 'Segundo tramo hasta', 'Entrada: distancia a la EMA20 en ATR',
       unit: 'ATR'),
-  _SpSpec('entry_mid_pct', 'Parte del peso en ese tramo',
+  _SpSpec('ent_p2', 'Parte del peso en el segundo tramo',
       'Entrada: distancia a la EMA20 en ATR',
       unit: '%', dec: 0),
-  _SpSpec('entry_neg_pct', 'Parte del peso si está al otro lado de la EMA20',
+  _SpSpec(
+      'ent_t3', 'Tercer tramo hasta', 'Entrada: distancia a la EMA20 en ATR',
+      unit: 'ATR'),
+  _SpSpec('ent_p3', 'Parte del peso en el tercer tramo',
       'Entrada: distancia a la EMA20 en ATR',
       unit: '%', dec: 0),
-  _SpSpec('w_rr', 'Peso', 'Beneficio/riesgo real', unit: 'puntos', dec: 0),
-  _SpSpec('rr_min', 'Cero puntos con B/R de', 'Beneficio/riesgo real'),
-  _SpSpec('rr_full', 'Puntos completos con B/R de', 'Beneficio/riesgo real'),
-  _SpSpec('w_vol', 'Peso', 'Volumen relativo', unit: 'puntos', dec: 0),
-  _SpSpec('vol_full', 'Puntos completos con volumen ≥ (y precio a favor)',
-      'Volumen relativo',
+  _SpSpec('cdl_w', 'Peso', 'Vela señal (reacción)',
+      unit: 'puntos',
+      dec: 0,
+      help:
+          'Un tercio por condición: mecha de rechazo (inferior en largos, superior en cortos), cierre '
+          'en la parte alta (baja) del rango y cierre por encima del máximo (por debajo del mínimo) '
+          'de la vela anterior.'),
+  _SpSpec('cdl_wick', 'Mecha de rechazo de al menos', 'Vela señal (reacción)',
+      unit: '% rango', dec: 0),
+  _SpSpec('cdl_pos', 'Cierre en el rango (largos ≥, cortos ≤ 1 − valor)',
+      'Vela señal (reacción)',
+      dec: 2),
+  _SpSpec('vol_w', 'Peso', 'Volumen relativo de la vela',
+      unit: 'puntos',
+      dec: 0,
+      help:
+          'Volumen de la última vela frente a la media de las 20 anteriores. Sin puntos si la vela '
+          'no va a favor de la operación (cierre frente a apertura).'),
+  _SpSpec('vol_t1', 'Todo el peso con volumen ≥', 'Volumen relativo de la vela',
       unit: '×'),
-  _SpSpec('vol_half', 'Mitad de puntos con volumen ≥', 'Volumen relativo',
+  _SpSpec(
+      'vol_t2', 'Segundo tramo con volumen ≥', 'Volumen relativo de la vela',
       unit: '×'),
-  _SpSpec('w_adx', 'Peso', 'ADX (fuerza de la tendencia)',
-      unit: 'puntos', dec: 0),
-  _SpSpec('adx_min', 'Puntos completos con ADX desde',
-      'ADX (fuerza de la tendencia)',
+  _SpSpec('vol_p2', 'Parte del peso en el segundo tramo',
+      'Volumen relativo de la vela',
+      unit: '%', dec: 0),
+  _SpSpec('vol_t3', 'Tercer tramo con volumen ≥', 'Volumen relativo de la vela',
+      unit: '×'),
+  _SpSpec('vol_p3', 'Parte del peso en el tercer tramo',
+      'Volumen relativo de la vela',
+      unit: '%', dec: 0),
+  _SpSpec('rr_w', 'Peso', 'Beneficio/riesgo hasta el objetivo',
+      unit: 'puntos',
+      dec: 0,
+      help:
+          'Por debajo del último tramo, 0 puntos y clasificación «Descartar».'),
+  _SpSpec(
+      'rr_t1', 'Todo el peso con B/R ≥', 'Beneficio/riesgo hasta el objetivo'),
+  _SpSpec(
+      'rr_t2', 'Segundo tramo con B/R ≥', 'Beneficio/riesgo hasta el objetivo'),
+  _SpSpec('rr_p2', 'Parte del peso en el segundo tramo',
+      'Beneficio/riesgo hasta el objetivo',
+      unit: '%', dec: 0),
+  _SpSpec('rr_t3', 'Tercer tramo con B/R ≥ (mínimo)',
+      'Beneficio/riesgo hasta el objetivo'),
+  _SpSpec('rr_p3', 'Parte del peso en el tercer tramo',
+      'Beneficio/riesgo hasta el objetivo',
+      unit: '%', dec: 0),
+  _SpSpec('trig_atr', 'Entrada: máximo (mínimo) de la vela ±',
+      'Gatillo y stop (para probar aparte)',
+      unit: 'ATR',
+      dec: 2,
+      help:
+          'No puntúan: cambian el plan. Con 0 / 0 / 0 se usa la regla de siempre (entrada en el máximo '
+          'o mínimo de la última vela; stop en su otro extremo o en la vela patrón).'),
+  _SpSpec('stop_atr', 'Margen del stop', 'Gatillo y stop (para probar aparte)',
+      unit: 'ATR', dec: 2),
+  _SpSpec('stop5', 'Stop en el extremo de 5 sesiones (1 = sí, 0 = no)',
+      'Gatillo y stop (para probar aparte)',
       dec: 0),
-  _SpSpec('adx_max', 'hasta', 'ADX (fuerza de la tendencia)', dec: 0),
-  _SpSpec('adx_out_pct', 'Parte del peso fuera de ese rango',
-      'ADX (fuerza de la tendencia)',
-      unit: '%', dec: 0),
-  _SpSpec('w_room', 'Peso', 'Colchón hasta el máximo (mínimo) de 52 semanas',
+  _SpSpec('cls_hi', 'Prioridad alta desde',
+      'Clasificación (provisional, sin validar)',
+      unit: 'puntos',
+      dec: 0,
+      help:
+          '«Entrada preparada»: nota ≥ candidata, entrada ≥ 40 % de su peso, vela ≥ 2/3 de su '
+          'peso y B/R ≥ el mínimo.'),
+  _SpSpec(
+      'cls_ok', 'Candidata desde', 'Clasificación (provisional, sin validar)',
       unit: 'puntos', dec: 0),
-  _SpSpec('room_min', 'Puntos si queda al menos',
-      'Colchón hasta el máximo (mínimo) de 52 semanas',
-      unit: '%'),
-  _SpSpec('w_candle', 'Peso', 'Vela de la última sesión',
-      unit: 'puntos',
-      dec: 0,
-      help:
-          'Martillo (estrella en cortos): puntos completos. Mecha a favor más larga: la mitad.'),
-  _SpSpec('w_struct', 'Peso', 'Estructura de máximos y mínimos',
-      unit: 'puntos',
-      dec: 0,
-      help: 'Crecientes en largos / decrecientes en cortos: puntos completos.'),
-  _SpSpec('w_figure', 'Peso', 'Figura (doble suelo / doble techo)',
-      unit: 'puntos',
-      dec: 0,
-      help:
-          'Doble suelo (techo en cortos) confirmado: completos; en formación: la mitad.'),
-  _SpSpec('mkt_verde', 'Mercado VERDE', 'Multiplicador por semáforo de mercado',
-      unit: '×', dec: 2),
-  _SpSpec('mkt_ambar', 'Mercado ÁMBAR', 'Multiplicador por semáforo de mercado',
-      unit: '×', dec: 2),
-  _SpSpec('mkt_rojo', 'Mercado ROJO', 'Multiplicador por semáforo de mercado',
-      unit: '×', dec: 2),
+  _SpSpec(
+      'cls_watch', 'Vigilar desde', 'Clasificación (provisional, sin validar)',
+      unit: 'puntos', dec: 0),
 ];
 
 const List<String> _kSpWeights = [
-  'w_rs3',
-  'w_rs1',
-  'w_entry',
-  'w_rr',
-  'w_vol',
-  'w_adx',
-  'w_room',
-  'w_candle',
-  'w_struct',
-  'w_figure'
+  'rs63s_w',
+  'rs63i_w',
+  'rs21s_w',
+  'ent_w',
+  'cdl_w',
+  'vol_w',
+  'rr_w'
 ];
 
 Map<String, Map<String, double>> _defaultScore() {
   Map<String, double> base() => {
-        'w_rs3': 15,
-        'w_rs1': 15,
-        'w_entry': 25,
-        'entry_full': 1,
-        'entry_mid': 2,
-        'entry_mid_pct': 60,
-        'entry_neg_pct': 60,
-        'w_rr': 20,
-        'rr_min': 1.5,
-        'rr_full': 3,
-        'w_vol': 10,
-        'vol_full': 1.2,
-        'vol_half': 1,
-        'w_adx': 10,
-        'adx_min': 20,
-        'adx_max': 40,
-        'adx_out_pct': 40,
-        'w_room': 5,
-        'room_min': 5,
-        'w_candle': 0,
-        'w_struct': 0,
-        'w_figure': 0,
+        'rs63s_w': 20,
+        'rs63i_w': 6,
+        'rs21s_w': 4,
+        'ent_w': 20,
+        'ent_t1': 0.5,
+        'ent_t2': 1,
+        'ent_p2': 80,
+        'ent_t3': 1.5,
+        'ent_p3': 40,
+        'cdl_w': 20,
+        'cdl_wick': 33,
+        'cdl_pos': 0.75,
+        'vol_w': 10,
+        'vol_t1': 1.5,
+        'vol_t2': 1.2,
+        'vol_p2': 70,
+        'vol_t3': 1.0,
+        'vol_p3': 40,
+        'rr_w': 20,
+        'rr_t1': 3,
+        'rr_t2': 2.5,
+        'rr_p2': 67,
+        'rr_t3': 2,
+        'rr_p3': 33,
+        'trig_atr': 0,
+        'stop_atr': 0,
+        'stop5': 0,
+        'cls_hi': 85,
+        'cls_ok': 80,
+        'cls_watch': 70,
       };
-  return {
-    'long': {...base(), 'mkt_verde': 1, 'mkt_ambar': 0.7, 'mkt_rojo': 0.5},
-    'short': {...base(), 'mkt_verde': 0.7, 'mkt_ambar': 1, 'mkt_rojo': 1},
-  };
+  return {'long': base(), 'short': base()};
 }
 
 /// Parámetros de puntuación vigentes (editables; se sincronizan con los ajustes).
@@ -1984,11 +2057,54 @@ double? _parse(String s) {
   return double.tryParse(t);
 }
 
+const _kMesL = [
+  'enero',
+  'febrero',
+  'marzo',
+  'abril',
+  'mayo',
+  'junio',
+  'julio',
+  'agosto',
+  'septiembre',
+  'octubre',
+  'noviembre',
+  'diciembre'
+];
+const _kMesS = [
+  'ene',
+  'feb',
+  'mar',
+  'abr',
+  'may',
+  'jun',
+  'jul',
+  'ago',
+  'sep',
+  'oct',
+  'nov',
+  'dic'
+];
+
+/// '2026-11-05' -> '5 noviembre' (con el año solo si no es el actual).
 String _fmtDate(String iso) {
-  final p = iso.split('-');
-  if (p.length != 3) return iso;
-  return '${p[2]}-${p[1]}-${p[0]}';
+  final d = DateTime.tryParse(iso.length >= 10 ? iso.substring(0, 10) : iso);
+  if (d == null) return iso;
+  final y = d.year != DateTime.now().year ? ' ${d.year}' : '';
+  return '${d.day} ${_kMesL[d.month - 1]}$y';
 }
+
+/// Versión corta para los ejes del gráfico: '5 nov' ('5 nov 25' si es de otro año).
+String _fmtDateShort(String iso) {
+  final d = DateTime.tryParse(iso.length >= 10 ? iso.substring(0, 10) : iso);
+  if (d == null) return iso;
+  final y = d.year != DateTime.now().year ? ' ${d.year % 100}' : '';
+  return '${d.day} ${_kMesS[d.month - 1]}$y';
+}
+
+/// Fecha y hora local: '5 noviembre 19:51'.
+String _fmtDT(DateTime t) =>
+    '${t.day} ${_kMesL[t.month - 1]} ${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
 String _fmt(_Field f, dynamic v) {
   if (v == null) return '–';
@@ -2078,8 +2194,6 @@ Color? _colorFor(_Field f, dynamic v) {
       case 'borrow_x':
         final mb = _ruleOn('short', 'borrow_x');
         return (mb != null && v < mb) ? _kRed : null;
-      case 'mkt_mult':
-        return v >= 1 ? _kGreen : (v < 0.7 ? _kRed : _kAmber);
       case 'adx':
         return (v >= 20 && v <= 40) ? _kGreen : null;
     }
@@ -2478,6 +2592,30 @@ class _HomeState extends State<_Home> {
     _maxCtl.text = _plain(_maxPos);
     await _load();
     _watchLatest();
+    _resumeJob();
+  }
+
+  /// Si al abrir la app hay una nube lanzada (desde aquí o desde otro dispositivo) que
+  /// aún no ha guardado sus datos, sigue esperándola y los carga solos al terminar.
+  Future<void> _resumeJob() async {
+    if (_jobRunning) return;
+    try {
+      final d = await cf.FirebaseFirestore.instance
+          .collection('screener')
+          .doc('job')
+          .get(const cf.GetOptions(source: cf.Source.server));
+      final req =
+          DateTime.tryParse((d.data()?['requested_at'] ?? '').toString());
+      final upd = DateTime.tryParse(_updatedIso);
+      if (req == null || !mounted) return;
+      if (DateTime.now().difference(req) > _kJobTimeout) return;
+      if (upd != null && !upd.isBefore(req)) return; // ya cargados
+      setState(() {
+        _jobRunning = true;
+        _jobStart = req.toLocal();
+      });
+      await _startJobPoll();
+    } catch (_) {}
   }
 
   /// Avisa cuando hay un snapshot nuevo guardado (job de las 22:30 o nube lanzada en
@@ -3033,7 +3171,8 @@ class _HomeState extends State<_Home> {
   String _pfDate() {
     final a = _pfAsof;
     if (a.length == 8)
-      return '${a.substring(6)}-${a.substring(4, 6)}-${a.substring(0, 4)}';
+      return _fmtDate(
+          '${a.substring(0, 4)}-${a.substring(4, 6)}-${a.substring(6)}');
     return a;
   }
 
@@ -3176,6 +3315,12 @@ class _HomeState extends State<_Home> {
         'qqq': us ? refs['QQQ'] : null,
         'dia': us ? refs['DIA'] : null,
       };
+      // Entorno para la puntuación: índice de referencia y ETF del sector
+      final ix = rf['idx'], sx = rf['sec'];
+      if (ix != null && ix['d_ema50'] != null) r['idx_a50'] = ix['d_ema50'];
+      if (ix != null && ix['s50_10'] != null) r['idx_s50'] = ix['s50_10'];
+      if (sx != null && sx['d_ema50'] != null) r['sec_a50'] = sx['d_ema50'];
+      if (sx != null && sx['s50_10'] != null) r['sec_s50'] = sx['s50_10'];
       rf.forEach((name, ref) {
         if (ref == null) return;
         for (final k in _kPeriods.keys) {
@@ -3611,9 +3756,7 @@ class _HomeState extends State<_Home> {
   String _asofLabel({bool lower = false}) {
     if (_isIntraday) {
       final t = DateTime.tryParse(_updatedIso)?.toLocal();
-      final hm = t == null
-          ? ''
-          : ' ${_two(t.day)}-${_two(t.month)} ${_two(t.hour)}:${_two(t.minute)}';
+      final hm = t == null ? '' : ' ${_fmtDT(t)}';
       return '${lower ? 'intradía' : 'Intradía'}$hm (provisional)';
     }
     return '${lower ? 'cierre del' : 'Cierre del'} ${_fmtDate(_asof)}';
@@ -3754,14 +3897,23 @@ class _HomeState extends State<_Home> {
       final px = _d(r['price']);
       final atrp = _d(r['atr_pct']);
       if (hi == null || lo == null || px == null) continue;
-      final entry = long ? hi : lo;
+      final atrAbs = (atrp != null && atrp > 0) ? atrp * px / 100 : null;
+      final trig = (atrAbs ?? 0) * _spv(_mode, 'trig_atr');
+      final buf = (atrAbs ?? 0) * _spv(_mode, 'stop_atr');
+      // Gatillo: superar el máximo (perder el mínimo) de la última vela ± margen en ATR.
+      // Stop: otro extremo de la vela o vela patrón (opcional: extremo de 5 sesiones) ± margen.
+      final entry = long ? hi + trig : lo - trig;
       final pat = long ? _d(r['hb_stop']) : _d(r['hs_stop']);
-      final stop = long
-          ? (pat != null ? math.min(lo, pat) : lo)
-          : (pat != null ? math.max(hi, pat) : hi);
+      final ext5 = _spv(_mode, 'stop5') >= 1
+          ? (long ? _d(r['lo5']) : _d(r['hi5']))
+          : null;
+      var base = long ? lo : hi;
+      for (final x in [pat, ext5]) {
+        if (x != null) base = long ? math.min(base, x) : math.max(base, x);
+      }
+      final stop = long ? base - buf : base + buf;
       final dist = (entry - stop).abs();
       if (dist <= 0 || entry <= 0) continue;
-      final atrAbs = (atrp != null && atrp > 0) ? atrp * px / 100 : null;
       var tgt = long ? _d(r['tgt_l']) : _d(r['tgt_s']);
       var capped = false;
       final capAtr = _ruleOn(_mode, 'target_cap');
@@ -3879,6 +4031,8 @@ class _HomeState extends State<_Home> {
             '≤ ${long ? 'superior' : 'inferior'} ${_num(long ? up : lo, 0)} %';
       }
     }
+    if (on('touch20') != null && r['t20_5'] == false)
+      return 'sin toque de la EMA20 en 5 velas';
     final vixMax = long ? on('vix') : null;
     if (vixMax != null) {
       final v = _d((_regime['us'] as Map?)?['vix']);
@@ -4062,97 +4216,136 @@ class _HomeState extends State<_Home> {
     final long = _mode == 'long';
     final m = long ? 'long' : 'short';
     double p(String k) => _spv(m, k);
+    const keys = [
+      'score',
+      'score_pre',
+      'pre_state',
+      'score_cls',
+      'setup',
+      'sc_rs',
+      'sc_ent',
+      'sc_cdl',
+      'sc_vol',
+      'sc_rr',
+      'ent_atr',
+      'env'
+    ];
     for (final r in all) {
-      r['score'] = null;
-      r['score_pre'] = null;
-      r['pre_state'] = null;
-      final st = _regimeOf(r);
-      r['mkt_mult'] = st == 'verde'
-          ? p('mkt_verde')
-          : (st == 'ambar' ? p('mkt_ambar') : p('mkt_rojo'));
+      for (final k in keys) {
+        r[k] = null;
+      }
+      // Entorno (indicador aparte, no puntúa): índice y sector frente a su EMA50 y su pendiente
+      final sg = long ? 1.0 : -1.0;
+      final env = [r['idx_a50'], r['idx_s50'], r['sec_a50'], r['sec_s50']]
+          .map(_d)
+          .toList();
+      if (env.any((x) => x != null)) {
+        final ok = env.where((x) => x != null && x * sg > 0).length;
+        final bad = env.where((x) => x != null && x * sg < 0).length;
+        r['env'] = ok >= 3 ? 'favorable' : (bad >= 3 ? 'adverso' : 'mixto');
+      }
     }
     final totW = _kSpWeights.fold<double>(0, (s, k) => s + math.max(0, p(k)));
     if (totW <= 0) return;
-    final rows = all.where((r) => r['swing_ok'] == true).toList();
     final sign = long ? 1.0 : -1.0;
-    Map<Map<String, dynamic>, double> pctRank(
-        double? Function(Map<String, dynamic>) get) {
-      final vals = <Map<String, dynamic>, double>{};
-      for (final r in rows) {
-        final v = get(r);
-        if (v != null) vals[r] = v * sign;
-      }
-      final sorted = vals.entries.toList()
-        ..sort((a, b) => a.value.compareTo(b.value));
-      final out = <Map<String, dynamic>, double>{};
-      final n = sorted.length;
-      for (var i = 0; i < n; i++) {
-        out[sorted[i].key] = n == 1 ? 1.0 : i / (n - 1);
-      }
-      return out;
+
+    // Fuerza relativa ajustada por volatilidad: peso × percentil, solo con el signo a favor
+    double mom(Map<String, dynamic> r, String k, double w) {
+      final m = _d(r[k]), pc = _d(r['${k}_p']);
+      if (m == null || pc == null || m * sign <= 0) return 0;
+      return w * (long ? pc : 1 - pc);
     }
 
-    final rs3 = pctRank((r) => _d(r['rs_sec_3m']) ?? _d(r['rs_ind_3m']));
-    final rs1 = pctRank((r) => _d(r['rs_idx_1m']) ?? _d(r['rs_spy_1m']));
-    double entryPts(double? ext) {
-      if (ext == null) return 0;
-      final e = ext * sign;
-      final w = p('w_entry');
-      return e < 0
-          ? w * p('entry_neg_pct') / 100
-          : (e <= p('entry_full')
-              ? w
-              : (e <= p('entry_mid') ? w * p('entry_mid_pct') / 100 : 0));
+    double tiersUp(double? v, double t1, double t2, double p2, double t3,
+        double p3, double w) {
+      if (v == null) return 0;
+      if (v >= t1) return w;
+      if (v >= t2) return w * p2 / 100;
+      if (v >= t3) return w * p3 / 100;
+      return 0;
     }
 
-    double rrPts(double? rr) {
-      final rrSpan = p('rr_full') - p('rr_min');
-      if (rr == null || rrSpan <= 0) return 0;
-      return p('w_rr') * ((rr - p('rr_min')) / rrSpan).clamp(0.0, 1.0);
+    double entryPts(double? d) {
+      if (d == null || d < 0) return 0;
+      if (d <= p('ent_t1')) return p('ent_w');
+      if (d <= p('ent_t2')) return p('ent_w') * p('ent_p2') / 100;
+      if (d <= p('ent_t3')) return p('ent_w') * p('ent_p3') / 100;
+      return 0;
     }
 
-    for (final r in rows) {
-      var sc = p('w_rs3') * (rs3[r] ?? 0) + p('w_rs1') * (rs1[r] ?? 0);
-      final ext = _d(r['a_ema20']);
+    double rrPts(double? rr) => tiersUp(rr, p('rr_t1'), p('rr_t2'), p('rr_p2'),
+        p('rr_t3'), p('rr_p3'), p('rr_w'));
+
+    double? ema20Of(Map<String, dynamic> r) {
+      final px = _d(r['price']), d20 = _d(r['d_ema20']);
+      return (px == null || d20 == null) ? null : px / (1 + d20 / 100);
+    }
+
+    double? distAtr(Map<String, dynamic> r, double? entry) {
+      final px = _d(r['price']), atrp = _d(r['atr_pct']), e20 = ema20Of(r);
+      if (entry == null ||
+          px == null ||
+          atrp == null ||
+          atrp <= 0 ||
+          e20 == null) return null;
+      return (entry - e20) / (atrp * px / 100) * sign;
+    }
+
+    String cls(int sc, double? rr) {
+      if (rr != null && rr < p('rr_t3')) return 'Descartar (B/R)';
+      if (sc >= p('cls_hi')) return 'Prioridad alta';
+      if (sc >= p('cls_ok')) return 'Candidata';
+      if (sc >= p('cls_watch')) return 'Vigilar';
+      return 'Descartar';
+    }
+
+    for (final r in all.where((r) => r['swing_ok'] == true)) {
+      // 1) Fuerza relativa ajustada por volatilidad
+      final scRs = mom(r, 'm63s', p('rs63s_w')) +
+          mom(r, 'm63i', p('rs63i_w')) +
+          mom(r, 'm21s', p('rs21s_w'));
+      // 4) Entrada: distancia a la EMA20 en ATR
+      final dEnt = distAtr(r, _d(r['p_entry']));
+      final scEnt = entryPts(dEnt);
+      // 5) Vela señal: reacción (mecha de rechazo, cierre en el rango, supera el extremo anterior)
+      final up = r['c_up'];
+      final pos = _d(r['c_pos']);
+      final wick = long ? _d(r['wk_lo']) : _d(r['wk_up']);
+      final withCandle = up is bool && (long ? up : !up);
+      final scCdl = p('cdl_w') /
+          3 *
+          [
+            wick != null && wick >= p('cdl_wick'),
+            pos != null &&
+                (long ? pos >= p('cdl_pos') : pos <= 1 - p('cdl_pos')),
+            (long ? r['brk_long'] : r['brk_short']) == true,
+          ].where((x) => x).length;
+      // 6) Volumen (solo con la vela a favor)
+      final scVol = withCandle
+          ? tiersUp(_d(r['vol_rel']), p('vol_t1'), p('vol_t2'), p('vol_p2'),
+              p('vol_t3'), p('vol_p3'), p('vol_w'))
+          : 0.0;
+      // 7) Beneficio/riesgo
       final rr = _d(r['p_rr']);
-      final basePts = entryPts(ext) + rrPts(rr);
-      sc += basePts;
-      final vr = _d(r['vol_rel']);
-      final chg = _d(r['chg_1d']) ?? 0;
-      if (vr != null) {
-        final withMove = long ? chg > 0 : chg < 0;
-        sc += (vr >= p('vol_full') && withMove)
-            ? p('w_vol')
-            : (vr >= p('vol_half') ? p('w_vol') / 2 : 0);
-      }
-      final ax = _d(r['adx']);
-      if (ax != null) {
-        sc += (ax >= p('adx_min') && ax <= p('adx_max'))
-            ? p('w_adx')
-            : p('w_adx') * p('adx_out_pct') / 100;
-      }
-      final room = long ? _d(r['d_high52']) : _d(r['d_low52']);
-      if (room != null &&
-          (long ? room <= -p('room_min') : room >= p('room_min'))) {
-        sc += p('w_room');
-      }
-      final cdl = r['cdl']?.toString();
-      if (cdl != null) {
-        if (cdl == (long ? 'martillo' : 'estrella')) {
-          sc += p('w_candle');
-        } else if (cdl == (long ? 'mecha inf.' : 'mecha sup.')) {
-          sc += p('w_candle') / 2;
-        }
-      }
-      final st = r['struct']?.toString() ?? '';
-      if (st.startsWith(long ? 'máx. y mín. crec' : 'máx. y mín. decrec'))
-        sc += p('w_struct');
-      final fig = r['figure']?.toString() ?? '';
-      if (fig.startsWith(long ? 'doble suelo' : 'doble techo')) {
-        sc += fig.contains('confirmado') ? p('w_figure') : p('w_figure') / 2;
-      }
-      final mult = _d(r['mkt_mult']) ?? 1.0;
-      r['score'] = (sc / totW * 100 * mult).round();
+      final scRr = rrPts(rr);
+
+      final sc = scRs + scEnt + scCdl + scVol + scRr;
+      final score = (sc / totW * 100).round();
+      r['score'] = score;
+      r['sc_rs'] = scRs;
+      r['sc_ent'] = scEnt;
+      r['sc_cdl'] = scCdl;
+      r['sc_vol'] = scVol;
+      r['sc_rr'] = scRr;
+      r['ent_atr'] = dEnt;
+      r['score_cls'] = cls(score, rr);
+      final ready = score >= p('cls_ok') &&
+          scEnt >= p('ent_w') * 0.4 &&
+          scCdl >= p('cdl_w') * 2 / 3 - 1e-9 &&
+          rr != null &&
+          rr >= p('rr_t3');
+      r['setup'] = ready ? 'preparada' : null;
+
       // ---- Pre-apertura: cómo queda el plan si abre al precio del pre-market
       final pre = _d(r['pre_px']);
       final entry = _d(r['p_entry']), stop = _d(r['p_stop']);
@@ -4173,22 +4366,20 @@ class _HomeState extends State<_Home> {
       }
       if (!triggered) {
         r['pre_state'] = 'en espera';
-        r['score_pre'] = r['score'];
+        r['score_pre'] = score;
         continue;
       }
       final gap = (pre - entry).abs() / atrAbs;
       r['pre_state'] = gap <= 0.5 ? 'abre activada' : 'hueco excesivo';
-      // Entrada real = precio de apertura (pre-market): nuevo B/R y nueva extensión
+      // Entrada real = precio de apertura (pre-market): nuevo B/R y nueva distancia a la EMA20
       final tgt = _d(r['p_target']);
       final dist = (pre - stop).abs();
       final rrNew = (tgt != null && dist > 0)
           ? (tgt - pre).abs() / dist * ((long ? tgt > pre : tgt < pre) ? 1 : 0)
           : null;
-      final d20 = _d(r['d_ema20']);
-      final ema20 = d20 == null ? null : px / (1 + d20 / 100);
-      final extNew = ema20 == null ? ext : (pre - ema20) / atrAbs;
-      final scPre = sc - basePts + entryPts(extNew) + rrPts(rrNew);
-      r['score_pre'] = (scPre / totW * 100 * mult).round();
+      final scPre =
+          sc - scEnt - scRr + entryPts(distAtr(r, pre)) + rrPts(rrNew);
+      r['score_pre'] = (scPre / totW * 100).round();
     }
   }
 
@@ -4210,16 +4401,13 @@ class _HomeState extends State<_Home> {
     final m = _mode;
     String n0(double v) => _num(v, v == v.roundToDouble() ? 0 : 1);
     final names = {
-      'w_rs3': 'Fuerza rel. 3m vs sector',
-      'w_rs1': 'Fuerza rel. 1m vs índice',
-      'w_entry': 'Entrada (cerca de la EMA20)',
-      'w_rr': 'B/R real',
-      'w_vol': 'Volumen',
-      'w_adx': 'ADX',
-      'w_room': 'Colchón 52 sem.',
-      'w_candle': 'Vela',
-      'w_struct': 'Estructura',
-      'w_figure': 'Figura',
+      'rs63s_w': 'Fuerza rel. 3m vs sector (aj.)',
+      'rs63i_w': 'Fuerza rel. 3m vs índice (aj.)',
+      'rs21s_w': 'Fuerza rel. 1m vs sector (aj.)',
+      'ent_w': 'Entrada (EMA20 en ATR)',
+      'cdl_w': 'Vela señal',
+      'vol_w': 'Volumen',
+      'rr_w': 'Beneficio/riesgo',
     };
     final active = _kSpWeights.where((k) => _spv(m, k) > 0).toList();
     return Container(
@@ -4265,8 +4453,9 @@ class _HomeState extends State<_Home> {
             ),
           const SizedBox(height: 4),
           Text(
-              'Mercado: verde ×${n0(_spv(m, 'mkt_verde'))} · ámbar ×${n0(_spv(m, 'mkt_ambar'))} · '
-              'rojo ×${n0(_spv(m, 'mkt_rojo'))}',
+              'Tendencia: filtro duro. Entorno: columna aparte. Prioridad alta ≥ '
+              '${n0(_spv(m, 'cls_hi'))} · candidata ≥ ${n0(_spv(m, 'cls_ok'))} · '
+              'vigilar ≥ ${n0(_spv(m, 'cls_watch'))} (provisional)',
               style: const TextStyle(fontSize: 12, color: _cMuted)),
         ],
       ),
@@ -4530,7 +4719,7 @@ class _HomeState extends State<_Home> {
       b.writeln();
       final why = r['discard'];
       b.writeln('${r['ticker']} · ${r['name']} — ${nv(r['price'])} $cs · '
-          '${why == null ? 'puntuación ${r['score'] ?? '–'} (×${nv(r['mkt_mult'], dec: 1)} mercado)' : 'DESCARTADO: $why'}'
+          '${why == null ? 'puntuación ${r['score'] ?? '–'}${r['score_cls'] != null ? ' (${r['score_cls']})' : ''}' : 'DESCARTADO: $why'}'
           '${r['market'] != null ? ' · ${r['market']}' : ''}');
 
       final e = _d(r['p_entry']);
@@ -5265,9 +5454,7 @@ class _HomeState extends State<_Home> {
           // Tras «Actualizar precios»: hora de los precios de la sesión
           if (_lastPrices != null)
             TextSpan(
-                text:
-                    '  ·  precios de las ${_two(_lastPrices!.hour)}:${_two(_lastPrices!.minute)} '
-                    'del ${_two(_lastPrices!.day)}-${_two(_lastPrices!.month)}',
+                text: '  ·  precios del ${_fmtDT(_lastPrices!)}',
                 style: const TextStyle(fontSize: 14, color: _kEdit)),
         ])),
       const SizedBox(width: 8),
@@ -5726,9 +5913,7 @@ class _HomeState extends State<_Home> {
         children: [
           const Icon(Icons.warning_amber_rounded, color: _kRed, size: 20),
           const SizedBox(width: 6),
-          Text(
-              'Mercado en rojo en $where: puntuación de largos '
-              '×${_num(_spv('long', 'mkt_rojo'), 2)}',
+          Text('Mercado en rojo en $where',
               style: const TextStyle(color: _kRed, fontSize: 13)),
         ],
       ));
