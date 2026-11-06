@@ -949,7 +949,7 @@ List<_Field> _buildFields() {
       s: true, w: 70, h: 'Hoy %');
   n(
       'pre_pct',
-      'Pre-apertura % (EE. UU., pre-market frente al último cierre; con «Actualizar precios»)',
+      'Pre-apertura % (EE. UU., pre-market frente al último cierre; con la nube o «Actualizar precios»)',
       _cTec,
       s: true,
       w: 80,
@@ -1223,7 +1223,7 @@ const Map<String, String> _kHelp = {
           'B/R y aumenta la extensión sobre la EMA20. Invalidada = 0. En espera = igual que la puntuación.',
   'pre_pct':
       'Solo valores de EE. UU. y solo antes de la apertura (de 10:00 a 15:30 hora de España). '
-          'Se rellena al pulsar «Actualizar precios». El pre-market tiene poco volumen: es una pista de '
+          'Se rellena con la nube o con «Actualizar precios». El pre-market tiene poco volumen: es una pista de '
           'cómo abrirá, no una señal.',
   'short_float':
       '% de las acciones en libre circulación que están vendidas a crédito (prestadas y '
@@ -1600,6 +1600,34 @@ const List<_RuleSpec> _kRuleSpecs = [
       help:
           'Largos: martillo. Cortos: martillo invertido (estrella). Mecha a favor ≥ 2× el cuerpo '
           'y ≥ 55 % del rango; la contraria ≤ 30 %.'),
+  _RuleSpec('pre', 'Valor en contra hoy, como máximo',
+      'Pre-apertura / Hoy no negativo',
+      unit: '%',
+      dec: 1,
+      help:
+          'Antes de la apertura mira la pre-apertura (EE. UU.); desde la apertura, el Hoy %. '
+          'Largos: descarta si baja más de este %. Cortos: si sube más. 0 = cualquier movimiento en '
+          'contra. Sin dato de hoy no descarta.'),
+  _RuleSpec('vix', 'VIX máximo', 'VIX ≤ {v}',
+      dec: 1,
+      only: 'long',
+      help:
+          'Si el VIX supera este nivel no pasa ningún largo (EE. UU. y Europa).'),
+  _RuleSpec('idx_pre', 'Pre-apertura del S&P en contra, como máximo',
+      'S&P en pre-apertura no negativo',
+      unit: '%',
+      dec: 1,
+      help:
+          'Pre-apertura del SPY. Largos: no pasan si baja más de este %. Cortos: si sube más. '
+          'Solo valores de EE. UU.; sin dato (fuera de 10:00–15:30) no descarta.'),
+  _RuleSpec(
+      'ind_dir', 'Industria en contra, como máximo', 'Industria no bajando',
+      unit: '%',
+      dec: 1,
+      help:
+          'ETF de la industria del valor (en Europa, el de su sector): su pre-apertura si la hay; '
+          'si no, la variación de hoy o de la última sesión. Largos: no pasan si baja más de este %. '
+          'Cortos: si sube más.'),
   _RuleSpec('earn', 'Resultados a más de', 'Resultados a más de {v} días',
       unit: 'días'),
   _RuleSpec('exdiv', 'Ex-dividendo a más de', 'Sin ex-dividendo en {v} días',
@@ -1640,6 +1668,10 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'rsi_max': _Rule(true, 70),
         'wick': _Rule(true, 0),
         'hammer': _Rule(false, 0),
+        'pre': _Rule(true, 0),
+        'vix': _Rule(true, 25),
+        'idx_pre': _Rule(true, 0),
+        'ind_dir': _Rule(true, 0),
         'earn': _Rule(true, 21),
         'exdiv': _Rule(false, 14),
         'stop_atr': _Rule(true, 1),
@@ -1657,6 +1689,9 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'rsi_min': _Rule(true, 30),
         'wick': _Rule(false, 0),
         'hammer': _Rule(true, 0),
+        'pre': _Rule(true, 0),
+        'idx_pre': _Rule(true, 0),
+        'ind_dir': _Rule(true, 0),
         'earn': _Rule(true, 14),
         'exdiv': _Rule(true, 14),
         'stop_atr': _Rule(true, 1),
@@ -1685,6 +1720,23 @@ String _ruleText(String mode, _RuleSpec sp) {
   final r = _rule(mode, sp.key);
   if (mode == 'short' && sp.key == 'hammer')
     return 'Última vela: martillo invertido';
+  if (sp.key == 'pre') {
+    final long = mode == 'long';
+    if (r.v == 0)
+      return 'Pre-apertura / Hoy no ${long ? 'negativo' : 'positivo'}';
+    return 'Pre-apertura / Hoy ${long ? '≥ −' : '≤ +'}${_num(r.v, r.v == r.v.roundToDouble() ? 0 : 1)} %';
+  }
+  if (sp.key == 'ind_dir') {
+    final long = mode == 'long';
+    if (r.v == 0) return 'Industria no ${long ? 'bajando' : 'subiendo'}';
+    return 'Industria ${long ? '≥ −' : '≤ +'}${_num(r.v, r.v == r.v.roundToDouble() ? 0 : 1)} %';
+  }
+  if (sp.key == 'idx_pre') {
+    final long = mode == 'long';
+    if (r.v == 0)
+      return 'S&P en pre-apertura no ${long ? 'negativo' : 'positivo'}';
+    return 'S&P en pre-apertura ${long ? '≥ −' : '≤ +'}${_num(r.v, r.v == r.v.roundToDouble() ? 0 : 1)} %';
+  }
   return sp.text
       .replaceAll('{v}', _num(r.v, r.v == r.v.roundToDouble() ? 0 : sp.dec));
 }
@@ -2298,11 +2350,16 @@ class _HomeState extends State<_Home> {
   double? _fx;
   Map<String, dynamic> _regime = {};
   List<Map<String, dynamic>> _macro = [];
+  // Calendario económico (lo guarda el job)
+  List<Map<String, dynamic>> _calEvents = [];
+  List<Map<String, dynamic>> _calCb = [];
+  bool _calFred = false;
+  final Set<String> _calCountries = {'USD', 'EUR'};
+  bool _calHigh = true, _calMed = true, _calMine = true;
   List<String> _chartCands =
       []; // candidatos (pasan filtros duros) para guardar su gráfico
   DateTime?
       _groupsLive; // hora de la última actualización al momento de Sectores e índices
-  bool _showRed = false;
   String _asof = '';
   String _snapMode = 'close';
   String _updatedIso = '';
@@ -2776,6 +2833,14 @@ class _HomeState extends State<_Home> {
         _macro = ((j['macro'] as List?) ?? [])
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
+        final cal = (j['calendar'] as Map?) ?? {};
+        _calEvents = ((cal['events'] as List?) ?? [])
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        _calCb = ((cal['cb'] as List?) ?? [])
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        _calFred = cal['fred'] == true;
         _applyGroupBetas();
         _computePlans();
         _asof = (j['asof'] ?? '').toString();
@@ -3163,7 +3228,15 @@ class _HomeState extends State<_Home> {
 
   /// Actualiza las tablas de «Sectores e índices» con los datos al momento.
   void _mergeGroups(Map<String, Map<String, dynamic>> refs) {
-    const keys = ['d_ema20', 'd_ema50', 'd_ema200', 'rsi_d', 'trend'];
+    const keys = [
+      'd_ema20',
+      'd_ema50',
+      'd_ema200',
+      'rsi_d',
+      'trend',
+      'chg_1d',
+      'last_date'
+    ];
     void upd(Map<String, dynamic> g, String sym) {
       final m = refs[sym];
       if (m == null) return;
@@ -3806,6 +3879,44 @@ class _HomeState extends State<_Home> {
             '≤ ${long ? 'superior' : 'inferior'} ${_num(long ? up : lo, 0)} %';
       }
     }
+    final vixMax = long ? on('vix') : null;
+    if (vixMax != null) {
+      final v = _d((_regime['us'] as Map?)?['vix']);
+      if (v != null && v > vixMax)
+        return 'VIX ${_num(v, 1)} (> ${n0(vixMax, 1)})';
+    }
+    final idxTol = on('idx_pre');
+    if (idxTol != null && r['currency'] != 'EUR') {
+      final sp = _d((_bench['SPY'] as Map?)?['pre_pct']);
+      if (sp != null && (long ? sp < -idxTol : sp > idxTol)) {
+        return 'S&P en pre-apertura ${sp > 0 ? '+' : ''}${_num(sp, 2)} % en contra';
+      }
+    }
+    final indTol = on('ind_dir');
+    if (indTol != null) {
+      final eu = r['currency'] == 'EUR';
+      final secs = eu ? _sectorsEu : _sectors;
+      final grp = ((!eu && r['ind_etf'] != null)
+              ? _industries[r['ind_etf']]
+              : null) as Map? ??
+          secs[r['sector']] as Map?;
+      final pp = _d(grp?['pre_pct']);
+      final mv = pp ?? _d(grp?['chg_1d']);
+      if (mv != null && (long ? mv < -indTol : mv > indTol)) {
+        final etf = (grp?['etf'] ?? r['ind_etf'] ?? '').toString();
+        return 'industria${etf.isEmpty ? '' : ' ($etf)'} ${mv > 0 ? '+' : ''}${_num(mv, 2)} %'
+            '${pp != null ? ' en pre-apertura' : ''} en contra';
+      }
+    }
+    final preTol = on('pre');
+    if (preTol != null) {
+      // Con sesión de hoy abierta manda el Hoy %; antes de abrir, la pre-apertura.
+      final hoy = g('chg_today');
+      final mv = hoy ?? g('pre_pct');
+      if (mv != null && (long ? mv < -preTol : mv > preTol)) {
+        return '${hoy != null ? 'hoy' : 'pre-apertura'} ${mv > 0 ? '+' : ''}${_num(mv, 2)} % en contra';
+      }
+    }
     final minDays = on('earn');
     if (minDays != null) {
       final de = g('days_to_earn');
@@ -4179,7 +4290,6 @@ class _HomeState extends State<_Home> {
         if (!t.startsWith(q) && !nm.contains(q)) return false;
       }
       if (onlyFav) return favs.contains(r['ticker']?.toString());
-      if (_mode == 'long' && !_showRed && _regimeOf(r) == 'rojo') return false;
       for (final f in fs) {
         if (!_match(r, f)) return false;
       }
@@ -4608,6 +4718,382 @@ class _HomeState extends State<_Home> {
     );
   }
 
+  // ---------------------------------------------------- calendario económico
+
+  static const _kWd = [
+    'lunes',
+    'martes',
+    'miércoles',
+    'jueves',
+    'viernes',
+    'sábado',
+    'domingo'
+  ];
+  static const _kMon = [
+    'ene',
+    'feb',
+    'mar',
+    'abr',
+    'may',
+    'jun',
+    'jul',
+    'ago',
+    'sep',
+    'oct',
+    'nov',
+    'dic'
+  ];
+
+  static double? _calNum(dynamic v) {
+    if (v == null) return null;
+    var t = v.toString().trim().replaceAll(',', '');
+    var m = 1.0;
+    const suf = {'%': 1.0, 'K': 1e3, 'M': 1e6, 'B': 1e9, 'T': 1e12};
+    for (final e in suf.entries) {
+      if (t.endsWith(e.key)) {
+        t = t.substring(0, t.length - 1);
+        m = e.value;
+        break;
+      }
+    }
+    final d = double.tryParse(t);
+    return d == null ? null : d * m;
+  }
+
+  /// Resultados y ex-dividendos de favoritos y cartera dentro de la ventana del calendario.
+  List<Map<String, dynamic>> _calMineEvents(DateTime from, DateTime to) {
+    final byT = {for (final r in _rows) r['ticker']?.toString(): r};
+    final src = <String, Map<String, dynamic>>{};
+    for (final m in _favs.values) {
+      for (final t in m) {
+        final r = byT[t];
+        if (r != null) src[t] = r;
+      }
+    }
+    if (_pfAllowed) {
+      for (final r in _pfRows()) {
+        final t = r['ticker']?.toString();
+        if (t != null && t.isNotEmpty) src[t] = r;
+      }
+    }
+    final pfSet = _pfAllowed
+        ? _pf.map((p) => p['ticker']?.toString()).toSet()
+        : <String?>{};
+    final out = <Map<String, dynamic>>[];
+    src.forEach((t, r) {
+      for (final k in ['next_earn', 'ex_div']) {
+        final ds = r[k]?.toString();
+        if (ds == null || ds.isEmpty) continue;
+        final d = DateTime.tryParse(ds);
+        if (d == null || d.isBefore(from) || d.isAfter(to)) continue;
+        out.add({
+          'day': DateTime(d.year, d.month, d.day),
+          'mine': k,
+          'ticker': t,
+          'name': r['name'],
+          'pf': pfSet.contains(t),
+        });
+      }
+    });
+    return out;
+  }
+
+  Widget _calToggle(String label, bool on, VoidCallback tap, {Color? color}) {
+    final c = color ?? _accent;
+    return InkWell(
+      onTap: tap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: on ? c.withOpacity(0.18) : Colors.transparent,
+          border: Border.all(color: on ? c : _cBorder),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Text(label,
+            style: TextStyle(fontSize: 13, color: on ? _cText : _cMuted)),
+      ),
+    );
+  }
+
+  String _calDay(DateTime d) =>
+      '${_kWd[d.weekday - 1]} ${d.day} ${_kMon[d.month - 1]}';
+
+  Widget _calendarView() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final from = today.subtract(const Duration(days: 7));
+    final to = today.add(const Duration(days: 21));
+    // Agrupa por día (hora local del dispositivo)
+    final byDay = <DateTime, List<Map<String, dynamic>>>{};
+    for (final e in _calEvents) {
+      final dt = DateTime.tryParse(e['d']?.toString() ?? '')?.toLocal();
+      if (dt == null) continue;
+      if (!_calCountries.contains(e['c'])) continue;
+      final imp = e['imp'];
+      if (imp == 'H' && !_calHigh) continue;
+      if (imp == 'M' && !_calMed) continue;
+      final day = DateTime(dt.year, dt.month, dt.day);
+      (byDay[day] ??= []).add({...e, '_dt': dt});
+    }
+    if (_calMine) {
+      for (final m in _calMineEvents(from, to)) {
+        (byDay[m['day'] as DateTime] ??= []).add(m);
+      }
+    }
+    final days = byDay.keys.toList()..sort();
+
+    Widget cbChip(Map<String, dynamic> c) {
+      final dt = DateTime.tryParse(c['d']?.toString() ?? '')?.toLocal();
+      if (dt == null) return const SizedBox.shrink();
+      final left = DateTime(dt.year, dt.month, dt.day).difference(today).inDays;
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: _cSurface,
+          border: Border.all(color: _cBorder),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text.rich(TextSpan(children: [
+          TextSpan(
+              text: '${c['bank']}  ',
+              style: const TextStyle(
+                  fontSize: 13.5, fontWeight: FontWeight.w700, color: _cText)),
+          TextSpan(
+              text: '${_calDay(dt)} · ${_two(dt.hour)}:${_two(dt.minute)}',
+              style: const TextStyle(fontSize: 13, color: _cText)),
+          TextSpan(
+              text: left <= 0 ? '  · hoy' : '  · en $left días',
+              style: TextStyle(
+                  fontSize: 12.5, color: left <= 7 ? _kAmber : _cMuted)),
+          if (c['proj'] == true)
+            const TextSpan(
+                text: '  · con proyecciones',
+                style: TextStyle(fontSize: 12.5, color: _cMuted)),
+        ])),
+      );
+    }
+
+    Widget head(String t, double w, {bool right = false}) => SizedBox(
+          width: w,
+          child: Text(t,
+              textAlign: right ? TextAlign.right : TextAlign.left,
+              style: const TextStyle(fontSize: 12, color: _cMuted)),
+        );
+
+    Widget evRow(Map<String, dynamic> e) {
+      if (e['mine'] != null) {
+        final earn = e['mine'] == 'next_earn';
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          child: Row(children: [
+            const SizedBox(
+                width: 56,
+                child:
+                    Text('–', style: TextStyle(color: _cMuted, fontSize: 13))),
+            SizedBox(
+              width: 46,
+              child: Icon(
+                  earn ? Icons.assessment_outlined : Icons.payments_outlined,
+                  size: 17,
+                  color: e['pf'] == true ? _kEdit : _kStar),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text.rich(TextSpan(children: [
+                TextSpan(
+                    text: earn ? 'Resultados ' : 'Ex-dividendo ',
+                    style: const TextStyle(fontSize: 14, color: _cText)),
+                TextSpan(
+                    text: '${e['ticker']}',
+                    style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: _cText)),
+                TextSpan(
+                    text:
+                        '  ${e['name'] ?? ''}${e['pf'] == true ? ' · cartera' : ' · favorito'}',
+                    style: const TextStyle(fontSize: 12.5, color: _cMuted)),
+              ])),
+            ),
+          ]),
+        );
+      }
+      final dt = e['_dt'] as DateTime;
+      final imp = e['imp'];
+      final impCol = imp == 'H' ? _kRed : (imp == 'M' ? _kAmber : _cMuted);
+      final a = e['a'], f = e['f'];
+      final an = _calNum(a), fn = _calNum(f);
+      final aCol = (an != null && fn != null && an != fn)
+          ? (an > fn ? _kGreen : _kRed)
+          : _cText;
+      final allDay = dt.hour == 0 && dt.minute == 0 && imp == 'X';
+      final past = dt.isBefore(now);
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(children: [
+          SizedBox(
+            width: 56,
+            child: Text(allDay ? 'día' : '${_two(dt.hour)}:${_two(dt.minute)}',
+                style:
+                    TextStyle(fontSize: 13.5, color: past ? _cMuted : _cText)),
+          ),
+          SizedBox(
+            width: 46,
+            child: Text(e['c'] == 'USD' ? 'EE. UU.' : 'Euro',
+                style: const TextStyle(fontSize: 12, color: _cMuted)),
+          ),
+          Container(
+            width: 8,
+            height: 8,
+            margin: const EdgeInsets.only(right: 6),
+            decoration: BoxDecoration(color: impCol, shape: BoxShape.circle),
+          ),
+          Expanded(
+            child: Tooltip(
+              message: e['en']?.toString() ?? '',
+              child: Text(e['t']?.toString() ?? '',
+                  style: TextStyle(
+                      fontSize: 14,
+                      color: _cText,
+                      fontWeight:
+                          imp == 'H' ? FontWeight.w600 : FontWeight.w400)),
+            ),
+          ),
+          SizedBox(
+            width: 78,
+            child: Text(a?.toString() ?? '–',
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: a == null ? _cMuted : aCol)),
+          ),
+          SizedBox(
+            width: 78,
+            child: Text(f?.toString() ?? '–',
+                textAlign: TextAlign.right,
+                style: const TextStyle(fontSize: 14, color: _cText)),
+          ),
+          SizedBox(
+            width: 78,
+            child: Text(e['p']?.toString() ?? '–',
+                textAlign: TextAlign.right,
+                style: const TextStyle(fontSize: 14, color: _cMuted)),
+          ),
+        ]),
+      );
+    }
+
+    final list = <Widget>[];
+    for (final d in days) {
+      final evs = byDay[d]!
+        ..sort((a, b) {
+          final da = a['_dt'] as DateTime?, db = b['_dt'] as DateTime?;
+          if (da == null && db == null) return 0;
+          if (da == null) return -1;
+          if (db == null) return 1;
+          return da.compareTo(db);
+        });
+      final isToday = d == today;
+      list.add(Padding(
+        padding: const EdgeInsets.only(top: 18, bottom: 4),
+        child: Row(children: [
+          Text(_calDay(d)[0].toUpperCase() + _calDay(d).substring(1),
+              style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: isToday
+                      ? _kAmber
+                      : (d.isBefore(today) ? _cMuted : _cText))),
+          if (isToday)
+            const Padding(
+              padding: EdgeInsets.only(left: 8),
+              child:
+                  Text('hoy', style: TextStyle(fontSize: 13, color: _kAmber)),
+            ),
+        ]),
+      ));
+      list.add(const Divider(height: 1, color: _cDivider));
+      for (final e in evs) {
+        list.add(evRow(e));
+      }
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
+      children: [
+        const Text('Bancos centrales · próximas decisiones de tipos',
+            style: TextStyle(fontSize: 13, color: _cMuted)),
+        const SizedBox(height: 8),
+        Wrap(spacing: 10, runSpacing: 8, children: [
+          for (final bank in ['Fed', 'BCE'])
+            ..._calCb.where((c) => c['bank'] == bank).take(2).map(cbChip),
+        ]),
+        const SizedBox(height: 18),
+        Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              _calToggle(
+                  'EE. UU.',
+                  _calCountries.contains('USD'),
+                  () => setState(() {
+                        _calCountries.contains('USD')
+                            ? _calCountries.remove('USD')
+                            : _calCountries.add('USD');
+                      })),
+              _calToggle(
+                  'Zona euro',
+                  _calCountries.contains('EUR'),
+                  () => setState(() {
+                        _calCountries.contains('EUR')
+                            ? _calCountries.remove('EUR')
+                            : _calCountries.add('EUR');
+                      })),
+              const SizedBox(width: 10),
+              _calToggle('Importancia alta', _calHigh,
+                  () => setState(() => _calHigh = !_calHigh),
+                  color: _kRed),
+              _calToggle(
+                  'Media', _calMed, () => setState(() => _calMed = !_calMed),
+                  color: _kAmber),
+              const SizedBox(width: 10),
+              _calToggle('Resultados y ex-dividendos de mis valores', _calMine,
+                  () => setState(() => _calMine = !_calMine),
+                  color: _kEdit),
+            ]),
+        const SizedBox(height: 10),
+        Text(
+            'Hora de este dispositivo. Real en verde/rojo: por encima/por debajo de la previsión '
+            '(no indica si es bueno o malo). '
+            '${_calFred ? 'Dato real de EE. UU.: FRED.' : 'Sin clave de FRED: el dato real no se rellena.'}'
+            ' Agenda: Forex Factory.',
+            style: const TextStyle(fontSize: 12, color: _cMuted)),
+        const SizedBox(height: 14),
+        Row(children: [
+          head('Hora', 56),
+          head('', 60),
+          const Expanded(
+              child: Text('Evento',
+                  style: TextStyle(fontSize: 12, color: _cMuted))),
+          head('Real', 78, right: true),
+          head('Previsión', 78, right: true),
+          head('Anterior', 78, right: true),
+        ]),
+        if (days.isEmpty)
+          const Padding(
+            padding: EdgeInsets.only(top: 30),
+            child: Text(
+                'Sin eventos todavía: se rellenan con la próxima ejecución del job (nube o 22:30).',
+                style: TextStyle(color: _cMuted, fontSize: 14)),
+          ),
+        ...list,
+      ],
+    );
+  }
+
   // ---------------------------------------------------- UI
 
   @override
@@ -4622,6 +5108,8 @@ class _HomeState extends State<_Home> {
       body = _screener(wide);
     } else if (_tab == 2 && _pfAllowed) {
       body = _portfolioView();
+    } else if (_tab == 3) {
+      body = _calendarView();
     } else {
       body = _sectorsView();
     }
@@ -4818,6 +5306,7 @@ class _HomeState extends State<_Home> {
       _tabBtn(0, 'Screener'),
       _tabBtn(1, 'Sectores e índices'),
       if (_pfAllowed) _tabBtn(2, 'Cartera'),
+      _tabBtn(3, 'Calendario'),
     ];
     if (wide) {
       return Container(
@@ -5238,15 +5727,9 @@ class _HomeState extends State<_Home> {
           const Icon(Icons.warning_amber_rounded, color: _kRed, size: 20),
           const SizedBox(width: 6),
           Text(
-              _showRed
-                  ? 'Mercado en rojo en $where: se muestran igualmente (puntuación ×0,5)'
-                  : 'Mercado en rojo en $where: largos ocultos',
+              'Mercado en rojo en $where: puntuación de largos '
+              '×${_num(_spv('long', 'mkt_rojo'), 2)}',
               style: const TextStyle(color: _kRed, fontSize: 13)),
-          TextButton(
-            style: TextButton.styleFrom(foregroundColor: _cText),
-            onPressed: () => setState(() => _showRed = !_showRed),
-            child: Text(_showRed ? 'Ocultar' : 'Mostrar igualmente'),
-          ),
         ],
       ));
     }
