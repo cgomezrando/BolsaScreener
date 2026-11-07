@@ -2563,8 +2563,12 @@ class _HomeState extends State<_Home> {
   Set<String> _presetDel =
       {}; // presets borrados ('modo|nombre'): no reaparecen al sincronizar
   String _search = '';
-  double _risk = 1000;
+  double _risk = 1000; // largos
   double _maxPos = 50000;
+  double? _riskS; // cortos (null = igual que largos)
+  double? _maxPosS;
+  double get _riskM => _mode == 'short' ? (_riskS ?? _risk) : _risk;
+  double get _maxPosM => _mode == 'short' ? (_maxPosS ?? _maxPos) : _maxPos;
 
   final _searchCtl = TextEditingController();
   final _riskCtl = TextEditingController();
@@ -2602,8 +2606,8 @@ class _HomeState extends State<_Home> {
     _ensurePre();
     _ensurePreScore();
     _save();
-    _riskCtl.text = _plain(_risk);
-    _maxCtl.text = _plain(_maxPos);
+    _riskCtl.text = _plain(_riskM);
+    _maxCtl.text = _plain(_maxPosM);
     await _load();
     _watchLatest();
     _resumeJob();
@@ -2681,6 +2685,8 @@ class _HomeState extends State<_Home> {
         'sortAsc': _sortAsc,
         'risk': _risk,
         'maxPos': _maxPos,
+        if (_riskS != null) 'riskS': _riskS,
+        if (_maxPosS != null) 'maxPosS': _maxPosS,
         'hard': _rulesToJson(),
         'score': _scoreToJson(),
         'pfCols': _pfCols,
@@ -2738,6 +2744,10 @@ class _HomeState extends State<_Home> {
       if (r != null && r > 0) _risk = r;
       final mp = _d(j['maxPos']);
       if (mp != null && mp > 0) _maxPos = mp;
+      final rs = _d(j['riskS']);
+      if (rs != null && rs > 0) _riskS = rs;
+      final ms = _d(j['maxPosS']);
+      if (ms != null && ms > 0) _maxPosS = ms;
       if (j['hard'] != null) _rulesFromJson(j['hard']);
       if (j['score'] != null) _scoreFromJson(j['score']);
       final pfc = (j['pfCols'] as List?)
@@ -2808,8 +2818,8 @@ class _HomeState extends State<_Home> {
   Future<void> _refreshAll() async {
     await _pullSettings();
     _computePlans();
-    _riskCtl.text = _plain(_risk);
-    _maxCtl.text = _plain(_maxPos);
+    _riskCtl.text = _plain(_riskM);
+    _maxCtl.text = _plain(_maxPosM);
     await _load();
   }
 
@@ -2857,6 +2867,8 @@ class _HomeState extends State<_Home> {
       }
       _risk = p.getDouble('scr_risk') ?? _risk;
       _maxPos = p.getDouble('scr_maxpos') ?? _maxPos;
+      _riskS = p.getDouble('scr_risk_s') ?? _riskS;
+      _maxPosS = p.getDouble('scr_maxpos_s') ?? _maxPosS;
       final hs = p.getString('scr_hard');
       if (hs != null) _rulesFromJson(jsonDecode(hs));
       final ss = p.getString('scr_score');
@@ -2917,6 +2929,8 @@ class _HomeState extends State<_Home> {
       p.setStringList('scr_presets_del', _presetDel.toList());
       p.setDouble('scr_risk', _risk);
       p.setDouble('scr_maxpos', _maxPos);
+      if (_riskS != null) p.setDouble('scr_risk_s', _riskS!);
+      if (_maxPosS != null) p.setDouble('scr_maxpos_s', _maxPosS!);
       p.setString('scr_hard', jsonEncode(_rulesToJson()));
       p.setString('scr_score', jsonEncode(_scoreToJson()));
       p.setString('scr_gorder', jsonEncode(_gOrder));
@@ -3942,8 +3956,8 @@ class _HomeState extends State<_Home> {
       }
       final fx =
           (r['currency'] == 'EUR' && _fx != null && _fx! > 0) ? _fx! : 1.0;
-      final risk = _risk / fx;
-      final maxPos = _maxPos / fx;
+      final risk = _riskM / fx;
+      final maxPos = _maxPosM / fx;
       final shares = (math.min(risk / dist, maxPos / entry) / 5).floor() * 5;
       r['p_entry'] = entry;
       r['p_stop'] = stop;
@@ -4512,6 +4526,8 @@ class _HomeState extends State<_Home> {
       _detail = null;
       _computePlans();
     });
+    _riskCtl.text = _plain(_riskM);
+    _maxCtl.text = _plain(_maxPosM);
     _save();
   }
 
@@ -4727,7 +4743,7 @@ class _HomeState extends State<_Home> {
           'DAX ${sg(eu?['dax_ema20'])} s/EMA20, ${nv(eu?['breadth'], dec: 0)} % > EMA50)');
     }
     b.writeln(
-        'Riesgo por operación ${_num(_risk, 0)} \$ · posición máx. ${_num(_maxPos, 0)} \$ '
+        'Riesgo por operación ${_num(_riskM, 0)} \$ · posición máx. ${_num(_maxPosM, 0)} \$ '
         '· entrada ${long ? 'sobre el máximo' : 'bajo el mínimo'} de la última sesión');
 
     for (final r in rows) {
@@ -5053,6 +5069,15 @@ class _HomeState extends State<_Home> {
     );
   }
 
+  /// Zona horaria del dispositivo: CET / CEST en España; si no, UTC±h.
+  String _tzLabel() {
+    final o = DateTime.now().timeZoneOffset;
+    if (o.inMinutes == 60) return 'CET';
+    if (o.inMinutes == 120) return 'CEST';
+    final h = o.inMinutes / 60;
+    return 'UTC${h >= 0 ? '+' : '−'}${_num(h.abs(), h == h.roundToDouble() ? 0 : 1)}';
+  }
+
   String _calDay(DateTime d) =>
       '${_kWd[d.weekday - 1]} ${d.day} ${_kMon[d.month - 1]}';
 
@@ -5125,7 +5150,7 @@ class _HomeState extends State<_Home> {
           padding: const EdgeInsets.symmetric(vertical: 7),
           child: Row(children: [
             const SizedBox(
-                width: 56,
+                width: 72,
                 child:
                     Text('–', style: TextStyle(color: _cMuted, fontSize: 13))),
             SizedBox(
@@ -5201,13 +5226,14 @@ class _HomeState extends State<_Home> {
       final aCol = (an != null && fn != null && an != fn)
           ? (an > fn ? _kGreen : _kRed)
           : _cText;
-      final allDay = dt.hour == 0 && dt.minute == 0 && imp == 'X';
+      final allDay =
+          e['allday'] == true || (dt.hour == 0 && dt.minute == 0 && imp == 'X');
       final past = dt.isBefore(now);
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 7),
         child: Row(children: [
           SizedBox(
-            width: 56,
+            width: 72,
             child: Text(allDay ? 'día' : '${_two(dt.hour)}:${_two(dt.minute)}',
                 style:
                     TextStyle(fontSize: 13.5, color: past ? _cMuted : _cText)),
@@ -5343,14 +5369,14 @@ class _HomeState extends State<_Home> {
               ]),
           const SizedBox(height: 10),
           Text(
-              'Hora de este dispositivo. Real en verde/rojo: por encima/por debajo de la previsión '
+              'Horas en ${_tzLabel()} (hora de este dispositivo). Real en verde/rojo: por encima/por debajo de la previsión '
               '(no indica si es bueno o malo). En resultados: BPA previsto y BPA del trimestre anterior. '
               '${_calFred ? 'Dato real de EE. UU.: FRED.' : 'Sin clave de FRED: el dato real no se rellena.'}'
               ' Agenda: Forex Factory.',
               style: const TextStyle(fontSize: 12, color: _cMuted)),
           const SizedBox(height: 14),
           Row(children: [
-            head('Hora', 56),
+            head('Hora ${_tzLabel()}', 72),
             head('', 60),
             const Expanded(
                 child: Text('Evento',
@@ -6394,8 +6420,8 @@ class _HomeState extends State<_Home> {
                 key: ValueKey('${det['ticker']}_$_mode'),
                 row: det,
                 mode: _mode,
-                risk: _risk,
-                maxPos: _maxPos,
+                risk: _riskM,
+                maxPos: _maxPosM,
                 fx: _fx,
                 regime: _regimeOf(det),
                 accent: _accent,
@@ -6752,7 +6778,8 @@ class _HomeState extends State<_Home> {
         const Text('Tamaño de posición',
             style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
         const SizedBox(height: 16),
-        _label('Riesgo máximo por operación (\$)'),
+        _label(
+            'Riesgo máximo por operación en ${_mode == 'short' ? 'cortos' : 'largos'} (\$)'),
         TextField(
           controller: _riskCtl,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -6761,7 +6788,11 @@ class _HomeState extends State<_Home> {
             final d = _parse(v);
             if (d != null && d > 0) {
               setState(() {
-                _risk = d;
+                if (_mode == 'short') {
+                  _riskS = d;
+                } else {
+                  _risk = d;
+                }
                 _computePlans();
               });
               _save();
@@ -6769,7 +6800,8 @@ class _HomeState extends State<_Home> {
           },
         ),
         const SizedBox(height: 16),
-        _label('Posición máxima (\$)'),
+        _label(
+            'Posición máxima en ${_mode == 'short' ? 'cortos' : 'largos'} (\$)'),
         TextField(
           controller: _maxCtl,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -6778,7 +6810,11 @@ class _HomeState extends State<_Home> {
             final d = _parse(v);
             if (d != null && d > 0) {
               setState(() {
-                _maxPos = d;
+                if (_mode == 'short') {
+                  _maxPosS = d;
+                } else {
+                  _maxPos = d;
+                }
                 _computePlans();
               });
               _save();
@@ -6788,7 +6824,8 @@ class _HomeState extends State<_Home> {
         const SizedBox(height: 10),
         const Text(
           'Acciones = riesgo ÷ distancia al stop, con tope de posición máxima '
-          'y redondeo a múltiplos de 5.',
+          'y redondeo a múltiplos de 5. Largos y cortos tienen valores propios: cambia '
+          'arriba entre Largos y Cortos para editar cada uno.',
           style: TextStyle(fontSize: 12, color: _cMuted),
         ),
       ],
