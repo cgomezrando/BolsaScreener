@@ -2470,6 +2470,20 @@ class _HomeState extends State<_Home> {
   bool _calFred = false;
   final Set<String> _calCountries = {'USD', 'EUR'};
   bool _calHigh = true, _calMed = true, _calMine = true;
+  // Seguimiento de señales
+  List<String>? _histDates; // cierres con snapshot completo (simulación)
+  final Map<String, Map<String, dynamic>> _histCache = {};
+  final Map<String, Map<String, List?>?> _fwdCache = {};
+  List<Map<String, dynamic>>?
+      _sigDocs; // señales originales guardadas por la app
+  String? _trkDay; // fecha o 'all'
+  String _trkMode = 'long';
+  String _trkView = 'orig'; // 'orig' | 'sim'
+  int _trkH = 5;
+  bool _trkBusy = false;
+  String? _trkErr;
+  List<Map<String, dynamic>> _trkRows = [];
+  String? _sigSavedKey;
   List<String> _chartCands =
       []; // candidatos (pasan filtros duros) para guardar su gráfico
   DateTime?
@@ -2788,6 +2802,7 @@ class _HomeState extends State<_Home> {
         'updated_ms': DateTime.now().millisecondsSinceEpoch,
       });
     } catch (_) {}
+    _saveSignals();
   }
 
   Future<void> _refreshAll() async {
@@ -2989,6 +3004,7 @@ class _HomeState extends State<_Home> {
       });
       await _loadPortfolio();
       _updateChartCands();
+      _saveSignals();
       _prefetchCharts();
     } catch (e) {
       if (!mounted) return;
@@ -4970,17 +4986,49 @@ class _HomeState extends State<_Home> {
         : <String?>{};
     final out = <Map<String, dynamic>>[];
     src.forEach((t, r) {
-      for (final k in ['next_earn', 'ex_div']) {
+      for (final k in ['next_earn', 'ex_div', 'eps_last_date']) {
         final ds = r[k]?.toString();
         if (ds == null || ds.isEmpty) continue;
         final d = DateTime.tryParse(ds);
         if (d == null || d.isBefore(from) || d.isAfter(to)) continue;
+        if (k == 'eps_last_date') {
+          // Resultados ya publicados: BPA real frente al previsto
+          out.add({
+            'day': DateTime(d.year, d.month, d.day),
+            'mine': 'next_earn',
+            'ticker': t,
+            'name': r['name'],
+            'pf': pfSet.contains(t),
+            'real': _d(r['eps_prev']),
+            'est': _d(r['eps_prev_est']),
+            'prev': null,
+            'when': null,
+            'cur': r['currency'] == 'EUR'
+                ? '€'
+                : r['currency'] == 'GBP'
+                    ? '£'
+                    : r['currency'] == 'USD'
+                        ? '\$'
+                        : '',
+          });
+          continue;
+        }
         out.add({
           'day': DateTime(d.year, d.month, d.day),
           'mine': k,
           'ticker': t,
           'name': r['name'],
           'pf': pfSet.contains(t),
+          'est': k == 'next_earn' ? _d(r['eps_est_next']) : null,
+          'prev': k == 'next_earn' ? _d(r['eps_prev']) : null,
+          'when': k == 'next_earn' ? r['earn_time'] : null,
+          'cur': r['currency'] == 'EUR'
+              ? '€'
+              : r['currency'] == 'GBP'
+                  ? '£'
+                  : r['currency'] == 'USD'
+                      ? '\$'
+                      : '',
         });
       }
     });
@@ -5101,9 +5149,46 @@ class _HomeState extends State<_Home> {
                         color: _cText)),
                 TextSpan(
                     text:
-                        '  ${e['name'] ?? ''}${e['pf'] == true ? ' · cartera' : ' · favorito'}',
+                        '  ${e['name'] ?? ''}${e['pf'] == true ? ' · cartera' : ' · favorito'}'
+                        '${e['when'] != null ? ' · ${e['when']}' : ''}',
                     style: const TextStyle(fontSize: 12.5, color: _cMuted)),
               ])),
+            ),
+            SizedBox(
+              width: 78,
+              child: Text(
+                  e['real'] == null
+                      ? '–'
+                      : '${_num(e['real'] as double, 2)} ${e['cur']}'.trim(),
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: e['real'] == null
+                          ? _cMuted
+                          : (e['est'] == null || e['real'] == e['est']
+                              ? _cText
+                              : ((e['real'] as double) > (e['est'] as double)
+                                  ? _kGreen
+                                  : _kRed)))),
+            ),
+            SizedBox(
+              width: 78,
+              child: Text(
+                  e['est'] == null
+                      ? '–'
+                      : '${_num(e['est'] as double, 2)} ${e['cur']}'.trim(),
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(fontSize: 14, color: _cText)),
+            ),
+            SizedBox(
+              width: 78,
+              child: Text(
+                  e['prev'] == null
+                      ? '–'
+                      : '${_num(e['prev'] as double, 2)} ${e['cur']}'.trim(),
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(fontSize: 14, color: _cMuted)),
             ),
           ]),
         );
@@ -5209,78 +5294,1052 @@ class _HomeState extends State<_Home> {
       }
     }
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
-      children: [
-        const Text('Bancos centrales · próximas decisiones de tipos',
-            style: TextStyle(fontSize: 13, color: _cMuted)),
-        const SizedBox(height: 8),
-        Wrap(spacing: 10, runSpacing: 8, children: [
-          for (final bank in ['Fed', 'BCE'])
-            ..._calCb.where((c) => c['bank'] == bank).take(2).map(cbChip),
+    // Cabecera fija (bancos centrales, filtros y títulos de columna); debajo, la agenda con scroll
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Container(
+        color: _cBg,
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Bancos centrales · próximas decisiones de tipos',
+              style: TextStyle(fontSize: 13, color: _cMuted)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 10, runSpacing: 8, children: [
+            for (final bank in ['Fed', 'BCE'])
+              ..._calCb.where((c) => c['bank'] == bank).take(2).map(cbChip),
+          ]),
+          const SizedBox(height: 18),
+          Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                _calToggle(
+                    'EE. UU.',
+                    _calCountries.contains('USD'),
+                    () => setState(() {
+                          _calCountries.contains('USD')
+                              ? _calCountries.remove('USD')
+                              : _calCountries.add('USD');
+                        })),
+                _calToggle(
+                    'Zona euro',
+                    _calCountries.contains('EUR'),
+                    () => setState(() {
+                          _calCountries.contains('EUR')
+                              ? _calCountries.remove('EUR')
+                              : _calCountries.add('EUR');
+                        })),
+                const SizedBox(width: 10),
+                _calToggle('Importancia alta', _calHigh,
+                    () => setState(() => _calHigh = !_calHigh),
+                    color: _kRed),
+                _calToggle(
+                    'Media', _calMed, () => setState(() => _calMed = !_calMed),
+                    color: _kAmber),
+                const SizedBox(width: 10),
+                _calToggle('Resultados y ex-dividendos de mis valores',
+                    _calMine, () => setState(() => _calMine = !_calMine),
+                    color: _kEdit),
+              ]),
+          const SizedBox(height: 10),
+          Text(
+              'Hora de este dispositivo. Real en verde/rojo: por encima/por debajo de la previsión '
+              '(no indica si es bueno o malo). En resultados: BPA previsto y BPA del trimestre anterior. '
+              '${_calFred ? 'Dato real de EE. UU.: FRED.' : 'Sin clave de FRED: el dato real no se rellena.'}'
+              ' Agenda: Forex Factory.',
+              style: const TextStyle(fontSize: 12, color: _cMuted)),
+          const SizedBox(height: 14),
+          Row(children: [
+            head('Hora', 56),
+            head('', 60),
+            const Expanded(
+                child: Text('Evento',
+                    style: TextStyle(fontSize: 12, color: _cMuted))),
+            head('Real', 78, right: true),
+            head('Previsión', 78, right: true),
+            head('Anterior', 78, right: true),
+          ]),
         ]),
-        const SizedBox(height: 18),
-        Wrap(
-            spacing: 8,
+      ),
+      const Divider(height: 1, color: _cDivider),
+      Expanded(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 40),
+          children: [
+            if (days.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 30),
+                child: Text(
+                    'Sin eventos todavía: se rellenan con la próxima ejecución del job (nube o 22:30).',
+                    style: TextStyle(color: _cMuted, fontSize: 14)),
+              ),
+            ...list,
+          ],
+        ),
+      ),
+    ]);
+  }
+
+  // ---------------------------------------------------- seguimiento
+
+  /// Filas de un snapshot (mismo formato que screener/latest), sin marcar «hoy».
+  List<Map<String, dynamic>> _parseSnapRows(Map<String, dynamic> j) {
+    final cols = (j['cols'] as List).map((e) => e.toString()).toList();
+    final rows = <Map<String, dynamic>>[];
+    for (final raw in (j['rows'] as List)) {
+      final l = raw as List;
+      final r = <String, dynamic>{};
+      for (var i = 0; i < cols.length && i < l.length; i++) {
+        r[cols[i]] = l[i];
+      }
+      r['hb_2050'] = _minN([r['hb20'], r['hb50']]);
+      r['hb_any'] = _minN([r['hb20'], r['hb50'], r['hb100'], r['hb200']]);
+      r['hs_any'] = _minN([r['hs20'], r['hs50'], r['hs100'], r['hs200']]);
+      final sl = [r['s_ema20'], r['s_ema50'], r['s_ema100'], r['s_ema200']];
+      if (sl.every((x) => x is num)) {
+        final ns = sl.cast<num>();
+        r['slope_all'] = ns.every((x) => x > 0)
+            ? 'todas suben'
+            : (ns.every((x) => x < 0) ? 'todas bajan' : 'mixtas');
+      }
+      rows.add(r);
+    }
+    return rows;
+  }
+
+  Future<Map<String, dynamic>?> _histSnap(String day) async {
+    final c = _histCache[day];
+    if (c != null) return c;
+    final db = cf.FirebaseFirestore.instance;
+    final meta = await db.collection('screener').doc('hist_$day').get();
+    final n = (meta.data()?['parts'] as num?)?.toInt() ?? 0;
+    if (n <= 0) return null;
+    final docs = await Future.wait(List.generate(
+        n, (i) => db.collection('screener').doc('hist_${day}_p$i').get()));
+    final sb = StringBuffer();
+    for (final d in docs) {
+      final s = d.data()?['data'];
+      if (s is! String) return null;
+      sb.write(s);
+    }
+    final j = jsonDecode(sb.toString()) as Map<String, dynamic>;
+    _histCache[day] = j;
+    return j;
+  }
+
+  /// Resultados posteriores de un cierre (los calcula el job): ticker -> [c0, o1, h1, l1, r1, r5, r10, r15]
+  Future<Map<String, List?>?> _fwd(String day) async {
+    if (_fwdCache.containsKey(day)) return _fwdCache[day];
+    final d = await cf.FirebaseFirestore.instance
+        .collection('screener')
+        .doc('hist_${day}_fwd')
+        .get();
+    final raw = d.data()?['data'];
+    final m = raw is String
+        ? (jsonDecode(raw) as Map)
+            .map((k, v) => MapEntry(k.toString(), v as List?))
+        : null;
+    _fwdCache[day] = m;
+    return m;
+  }
+
+  /// Filtros duros, plan y puntuación de un cierre pasado con los parámetros actuales.
+  List<Map<String, dynamic>> _scoreSnapshot(
+      Map<String, dynamic> j, String mode) {
+    final rows = _parseSnapRows(j);
+    final sv = [_rows, _sectors, _industries, _bench, _sectorsEu, _regime];
+    final svFx = _fx, svMode = _mode;
+    try {
+      _rows = rows;
+      _sectors = Map<String, dynamic>.from((j['sectors'] as Map?) ?? {});
+      _industries = Map<String, dynamic>.from((j['industries'] as Map?) ?? {});
+      _bench = Map<String, dynamic>.from((j['benchmarks'] as Map?) ?? {});
+      _sectorsEu = Map<String, dynamic>.from((j['sectors_eu'] as Map?) ?? {});
+      _regime = Map<String, dynamic>.from((j['regime'] as Map?) ?? {});
+      _fx = _d(((j['fx'] as Map?) ?? {})['EURUSD']);
+      _mode = mode;
+      _applyGroupBetas();
+      _computePlans();
+    } finally {
+      _rows = sv[0] as List<Map<String, dynamic>>;
+      _sectors = sv[1] as Map<String, dynamic>;
+      _industries = sv[2] as Map<String, dynamic>;
+      _bench = sv[3] as Map<String, dynamic>;
+      _sectorsEu = sv[4] as Map<String, dynamic>;
+      _regime = sv[5] as Map<String, dynamic>;
+      _fx = svFx;
+      _mode = svMode;
+    }
+    return rows;
+  }
+
+  static const _kSigCols = [
+    't',
+    'name',
+    'score',
+    'cls',
+    'env',
+    'sc_rs',
+    'sc_ent',
+    'sc_cdl',
+    'sc_vol',
+    'sc_rr',
+    'entry',
+    'stop',
+    'target',
+    'rr',
+    'px',
+    'setup',
+    'sec_etf',
+    'home_idx',
+    'cur',
+    'dte'
+  ];
+
+  static List<List<dynamic>> _sigRows(List<Map<String, dynamic>> rows) => rows
+      .where((r) => r['swing_ok'] == true)
+      .map((r) => [
+            r['ticker'],
+            r['name'],
+            r['score'],
+            r['score_cls'],
+            r['env'],
+            r['sc_rs'],
+            r['sc_ent'],
+            r['sc_cdl'],
+            r['sc_vol'],
+            r['sc_rr'],
+            r['p_entry'],
+            r['p_stop'],
+            r['p_target'],
+            r['p_rr'],
+            r['price'],
+            r['setup'],
+            r['sec_etf'],
+            r['home_idx'],
+            r['currency'],
+            r['days_to_earn'],
+          ])
+      .toList();
+
+  String? _paramsLogged;
+
+  /// Registro de parámetros con su fecha (users/<uid>/signals/_params): permite reconstruir
+  /// lo que habría indicado el modelo en un cierre en el que no se abrió la app.
+  Future<void> _logParams(String uid, String params) async {
+    if (_paramsLogged == params) return;
+    try {
+      final ref = cf.FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('signals')
+          .doc('_params');
+      final d = await ref.get();
+      final log = ((d.data()?['log'] as List?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      if (log.isEmpty || log.last['p'] != params) {
+        log.add({'ts': DateTime.now().toUtc().toIso8601String(), 'p': params});
+        while (log.length > 300) {
+          log.removeAt(0);
+        }
+        await ref.set({'log': log});
+      }
+      _paramsLogged = params;
+    } catch (_) {}
+  }
+
+  /// Señales de los cierres guardados en los que no se abrió la app: se calculan con los
+  /// parámetros que estaban vigentes antes de la sesión siguiente (registro de parámetros).
+  Future<void> _rebuildMissing(List<String> histAll) async {
+    final uid = _uid;
+    if (uid == null) return;
+    final db = cf.FirebaseFirestore.instance;
+    final pd = await db
+        .collection('users')
+        .doc(uid)
+        .collection('signals')
+        .doc('_params')
+        .get();
+    final log = ((pd.data()?['log'] as List?) ?? [])
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    if (log.isEmpty) return;
+    final have = {
+      for (final d in _sigDocs ?? <Map<String, dynamic>>[])
+        '${d['asof']}_${d['mode']}'
+    };
+    final sorted = [...histAll]..sort();
+    for (var i = 0; i < sorted.length; i++) {
+      final day = sorted[i];
+      if (have.contains('${day}_long') && have.contains('${day}_short'))
+        continue;
+      if (i + 1 >= sorted.length)
+        continue; // el último cierre lo guarda la app al cargarlo
+      final cutoff = DateTime.parse('${sorted[i + 1]}T08:00:00Z');
+      String? params;
+      for (final e in log) {
+        final ts = DateTime.tryParse('${e['ts']}');
+        if (ts != null && !ts.isAfter(cutoff)) params = e['p']?.toString();
+      }
+      if (params == null) continue; // sin parámetros registrados de entonces
+      final j = await _histSnap(day);
+      if (j == null) continue;
+      final svHard = _hard, svSp = _sp;
+      try {
+        final pj = jsonDecode(params) as Map;
+        _rulesFromJson(pj['hard']);
+        _scoreFromJson(pj['score']);
+        for (final mode in ['long', 'short']) {
+          if (have.contains('${day}_$mode')) continue;
+          final rows = _sigRows(_scoreSnapshot(j, mode));
+          final doc = {
+            'asof': day,
+            'mode': mode,
+            'model': 'v2',
+            'params': params,
+            'rebuilt': true,
+            'saved': DateTime.now().toUtc().toIso8601String(),
+            'cols': _kSigCols,
+            'rows': jsonEncode(rows),
+            'out': null,
+            'final': false,
+          };
+          await db
+              .collection('users')
+              .doc(uid)
+              .collection('signals')
+              .doc('${day}_$mode')
+              .set(doc);
+          _sigDocs?.add(doc);
+        }
+      } catch (_) {
+      } finally {
+        _hard = svHard;
+        _sp = svSp;
+      }
+    }
+  }
+
+  /// Guarda lo que indicó el modelo en este cierre (largos y cortos), con sus parámetros, para
+  /// evaluarlo después tal cual. Solo con un cierre cargado: al empezar la sesión siguiente ya
+  /// no se toca.
+  Future<void> _saveSignals() async {
+    final uid = _uid;
+    if (uid == null) return;
+    final params =
+        jsonEncode({'hard': _rulesToJson(), 'score': _scoreToJson()});
+    _logParams(uid, params);
+    if (_snapMode != 'close' || _asof.isEmpty || _rows.isEmpty) return;
+    final key = '$_asof|${params.hashCode}';
+    if (_sigSavedKey == key) return;
+    _sigSavedKey = key;
+    try {
+      for (final mode in ['long', 'short']) {
+        final copy = _rows.map((r) => Map<String, dynamic>.from(r)).toList();
+        final sv = _rows, svMode = _mode;
+        try {
+          _rows = copy;
+          _mode = mode;
+          _computePlans();
+        } finally {
+          _rows = sv;
+          _mode = svMode;
+        }
+        final rows = _sigRows(copy);
+        await cf.FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .collection('signals')
+            .doc('${_asof}_$mode')
+            .set({
+          'asof': _asof,
+          'mode': mode,
+          'model': 'v2',
+          'params': params,
+          'saved': DateTime.now().toUtc().toIso8601String(),
+          'cols': _kSigCols,
+          'rows': jsonEncode(rows),
+          'out': null,
+          'final': false,
+        });
+      }
+      _sigDocs = null; // recargar en Seguimiento
+    } catch (_) {
+      _sigSavedKey = null;
+    }
+  }
+
+  Future<void> _loadTrackIndex() async {
+    try {
+      final db = cf.FirebaseFirestore.instance;
+      final d = await db.collection('screener').doc('hist_index').get();
+      final ds = ((d.data()?['dates'] as List?) ?? [])
+          .map((e) => e.toString())
+          .toList()
+        ..sort();
+      final uid = _uid;
+      final sig = <Map<String, dynamic>>[];
+      if (uid != null) {
+        final q =
+            await db.collection('users').doc(uid).collection('signals').get();
+        for (final x in q.docs) {
+          if (x.id != '_params') sig.add(x.data());
+        }
+      }
+      _sigDocs = sig;
+      await _rebuildMissing(ds);
+      if (!mounted) return;
+      setState(() {
+        _histDates = ds
+            .where((x) =>
+                _asof.compareTo(x) > 0 || ds.any((y) => y.compareTo(x) > 0))
+            .toList()
+          ..sort((a, b) => b.compareTo(a));
+        _sigDocs = sig;
+      });
+      _trkDay ??= _trkDates().isNotEmpty ? _trkDates().first : null;
+      await _runTrack();
+    } catch (e) {
+      if (mounted) setState(() => _trkErr = e.toString());
+    }
+  }
+
+  /// Fechas disponibles en la vista actual (más recientes primero).
+  List<String> _trkDates() {
+    if (_trkView == 'sim') return _histDates ?? [];
+    final s = <String>{};
+    for (final d in _sigDocs ?? <Map<String, dynamic>>[]) {
+      if (d['mode'] == _trkMode && d['asof'] != null)
+        s.add(d['asof'].toString());
+    }
+    final l = s
+        .where((x) => _asof.compareTo(x) > 0 || _snapMode == 'intraday')
+        .toList()
+      ..sort((a, b) => b.compareTo(a));
+    return l;
+  }
+
+  Map<String, dynamic>? _sigDoc(String day) {
+    for (final d in _sigDocs ?? <Map<String, dynamic>>[]) {
+      if (d['asof'] == day && d['mode'] == _trkMode) return d;
+    }
+    return null;
+  }
+
+  /// Une señales (originales o simuladas) con sus resultados posteriores.
+  Future<List<Map<String, dynamic>>> _trackRecords(String day) async {
+    final fwd = await _fwd(day) ?? {};
+    final recs = <Map<String, dynamic>>[];
+    if (_trkView == 'orig') {
+      final doc = _sigDoc(day);
+      if (doc == null) return recs;
+      final cols =
+          ((doc['cols'] as List?) ?? []).map((e) => e.toString()).toList();
+      final rows = jsonDecode((doc['rows'] ?? '[]').toString()) as List;
+      final outs = doc['out'] is String
+          ? jsonDecode(doc['out'] as String) as List?
+          : null;
+      for (var i = 0; i < rows.length; i++) {
+        final l = rows[i] as List;
+        final r = <String, dynamic>{
+          for (var k = 0; k < cols.length && k < l.length; k++) cols[k]: l[k]
+        };
+        r['day'] = day;
+        r['rebuilt'] = doc['rebuilt'] == true;
+        r['out'] = (outs != null && i < outs.length) ? outs[i] : null;
+        recs.add(r);
+      }
+    } else {
+      final j = await _histSnap(day);
+      if (j == null)
+        throw Exception('No se encuentra el cierre del ${_fmtDate(day)}.');
+      for (final r
+          in _scoreSnapshot(j, _trkMode).where((r) => r['swing_ok'] == true)) {
+        recs.add({
+          't': r['ticker'],
+          'name': r['name'],
+          'score': r['score'],
+          'cls': r['score_cls'],
+          'env': r['env'],
+          'sc_rs': r['sc_rs'],
+          'sc_ent': r['sc_ent'],
+          'sc_cdl': r['sc_cdl'],
+          'sc_vol': r['sc_vol'],
+          'sc_rr': r['sc_rr'],
+          'entry': r['p_entry'],
+          'stop': r['p_stop'],
+          'target': r['p_target'],
+          'rr': r['p_rr'],
+          'px': r['price'],
+          'setup': r['setup'],
+          'sec_etf': r['sec_etf'],
+          'home_idx': r['home_idx'],
+          'cur': r['currency'],
+          'dte': r['days_to_earn'],
+          'day': day,
+        });
+      }
+    }
+    final long = _trkMode == 'long';
+    final sg = long ? 1.0 : -1.0;
+    final hi = {1: 4, 5: 5, 10: 6, 15: 7}[_trkH]!;
+    double? f(String? t, int i) {
+      final l = t == null ? null : fwd[t];
+      return (l == null || i >= l.length) ? null : _d(l[i]);
+    }
+
+    for (final r in recs) {
+      final t = r['t']?.toString();
+      final mv = f(t, hi);
+      final secMv = f(r['sec_etf']?.toString(), hi);
+      final idxT = r['cur'] == 'EUR' ? r['home_idx']?.toString() : 'SPY';
+      final idxMv = f(idxT, hi);
+      r['mv'] = mv;
+      r['fav'] = mv == null ? null : mv * sg;
+      r['rel'] = (mv != null && secMv != null) ? (mv - secMv) * sg : null;
+      // T+1: ¿activó la entrada? (en simulación, a partir de máximo y mínimo de T+1)
+      final c0 = f(t, 0), h1 = f(t, 2), l1 = f(t, 3), o1 = f(t, 1);
+      final entry = _d(r['entry']);
+      bool? trig;
+      if (c0 != null && h1 != null && l1 != null && entry != null) {
+        trig =
+            long ? c0 * (1 + h1 / 100) >= entry : c0 * (1 + l1 / 100) <= entry;
+      }
+      r['trig1'] = trig;
+      r['gap1'] = o1;
+      // Factores observados cuando el movimiento al horizonte fue en contra
+      final fx = <String>[];
+      if (mv != null && mv * sg < 0) {
+        final m1 = f(idxT, 4), s1 = f(r['sec_etf']?.toString(), 4);
+        if (idxMv != null && idxMv * sg < -0.3)
+          fx.add('mercado en contra (${_num(idxMv, 1)} %)');
+        if (secMv != null && secMv * sg < -0.3)
+          fx.add('sector en contra (${_num(secMv, 1)} %)');
+        if (o1 != null && o1 * sg < -0.5)
+          fx.add('hueco en contra T+1 (${_num(o1, 1)} %)');
+        final out = r['out'] as Map?;
+        final st = out?['st'];
+        if (st == 'sin operación' || (out == null && trig == false))
+          fx.add('no activó la entrada');
+        if (st == 'stop') fx.add('stop alcanzado');
+        if (r['env'] == 'adverso') fx.add('entorno adverso');
+        final dte = _d(r['dte']);
+        if (dte != null && dte <= _trkH + 2)
+          fx.add('resultados dentro del horizonte');
+        final w = {
+          'sc_rs': [
+            'RS',
+            _spv(_trkMode, 'rs63s_w') +
+                _spv(_trkMode, 'rs63i_w') +
+                _spv(_trkMode, 'rs21s_w')
+          ],
+          'sc_ent': ['entrada', _spv(_trkMode, 'ent_w')],
+          'sc_cdl': ['vela', _spv(_trkMode, 'cdl_w')],
+          'sc_vol': ['volumen', _spv(_trkMode, 'vol_w')],
+          'sc_rr': ['B/R', _spv(_trkMode, 'rr_w')],
+        };
+        w.forEach((k, v) {
+          final pts = _d(r[k]), ww = v[1] as double;
+          if (pts != null && ww > 0 && pts < ww / 3)
+            fx.add('${v[0]} con pocos puntos');
+        });
+        if ((m1 == null || m1 * sg >= 0) &&
+            (s1 == null || s1 * sg >= 0) &&
+            (idxMv == null || idxMv * sg >= 0) &&
+            (secMv == null || secMv * sg >= 0)) {
+          fx.add('movimiento contrario pese a referencias favorables');
+        }
+      }
+      r['factors'] = fx.join(' · ');
+    }
+    recs.sort((a, b) =>
+        ((b['score'] as num?) ?? -1).compareTo((a['score'] as num?) ?? -1));
+    return recs;
+  }
+
+  Future<void> _runTrack() async {
+    setState(() {
+      _trkBusy = true;
+      _trkErr = null;
+    });
+    try {
+      final dates = _trkDates();
+      if (_trkDay != null && _trkDay != 'all' && !dates.contains(_trkDay)) {
+        _trkDay = dates.isNotEmpty ? dates.first : null;
+      }
+      _trkDay ??= dates.isNotEmpty ? dates.first : null;
+      final out = <Map<String, dynamic>>[];
+      if (_trkDay == 'all') {
+        for (final d in dates) {
+          out.addAll(await _trackRecords(d));
+        }
+      } else if (_trkDay != null) {
+        out.addAll(await _trackRecords(_trkDay!));
+      }
+      if (!mounted) return;
+      setState(() {
+        _trkRows = out;
+        _trkBusy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _trkErr = e.toString();
+        _trkBusy = false;
+      });
+    }
+  }
+
+  Widget _trackView() {
+    if (_sigDocs == null && _trkErr == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_sigDocs == null && !_trkBusy) _loadTrackIndex();
+      });
+      return const Center(child: CircularProgressIndicator());
+    }
+    final long = _trkMode == 'long';
+    final orig = _trkView == 'orig';
+    final accent = long ? _kGreen : _kRed;
+    String pc(double? v, {int dec = 2}) =>
+        v == null ? '–' : '${v > 0 ? '+' : ''}${_num(v, dec)}';
+    Color col(double? v) =>
+        v == null ? _cMuted : (v > 0 ? _kGreen : (v < 0 ? _kRed : _cText));
+    double? avg(Iterable<double?> xs) {
+      final v = xs.whereType<double>().toList();
+      return v.isEmpty ? null : v.reduce((a, b) => a + b) / v.length;
+    }
+
+    final rows = _trkRows;
+    final done = rows
+        .where((r) => r['fav'] != null)
+        .toList(); // señales con el horizonte completo
+    final nFav = done.where((r) => (r['fav'] as double) > 0).length;
+    final days = rows.map((r) => r['day']).toSet().length;
+    Map? outOf(Map<String, dynamic> r) => r['out'] as Map?;
+    final ops = rows
+        .where((r) => const ['stop', 'objetivo', 'tiempo', 'abierta', 'ambigua']
+            .contains(outOf(r)?['st']))
+        .toList();
+    final closed = ops
+        .where((r) =>
+            const ['stop', 'objetivo', 'tiempo'].contains(outOf(r)?['st']))
+        .toList();
+    final open = ops.where((r) => outOf(r)?['st'] == 'abierta').toList();
+    double? rOf(Map<String, dynamic> r) => _d(outOf(r)?['r']);
+
+    Widget stat(String label, String value, {Color? c, String? sub}) =>
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: _cSurface,
+            border: Border.all(color: _cBorder),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(label, style: const TextStyle(fontSize: 12, color: _cMuted)),
+            const SizedBox(height: 3),
+            Text(value,
+                style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: c ?? _cText)),
+            if (sub != null)
+              Text(sub, style: const TextStyle(fontSize: 11.5, color: _cMuted)),
+          ]),
+        );
+
+    Widget cell(String t, double w,
+            {Color? c, bool right = true, FontWeight? fw}) =>
+        SizedBox(
+          width: w,
+          child: Text(t,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: right ? TextAlign.right : TextAlign.left,
+              style:
+                  TextStyle(fontSize: 13, color: c ?? _cText, fontWeight: fw)),
+        );
+    Widget head(String t, double w, {bool right = true}) => SizedBox(
+          width: w,
+          child: Text(t,
+              textAlign: right ? TextAlign.right : TextAlign.left,
+              style: const TextStyle(fontSize: 11.5, color: _cMuted)),
+        );
+
+    // Relación entre bloques y resultados: tramos bajo/medio/alto de cada bloque
+    final wRs = _spv(_trkMode, 'rs63s_w') +
+        _spv(_trkMode, 'rs63i_w') +
+        _spv(_trkMode, 'rs21s_w');
+    final blocks = <List<Object>>[
+      ['score', 'Nota total', 100.0],
+      ['sc_rs', 'Fuerza relativa', wRs],
+      ['sc_ent', 'Entrada (EMA20)', _spv(_trkMode, 'ent_w')],
+      ['sc_cdl', 'Vela señal', _spv(_trkMode, 'cdl_w')],
+      ['sc_vol', 'Volumen', _spv(_trkMode, 'vol_w')],
+      ['sc_rr', 'Beneficio/riesgo', _spv(_trkMode, 'rr_w')],
+    ];
+    Widget bucketCell(List<Map<String, dynamic>> g) {
+      final m = avg(g.map((r) => _d(r['fav'])));
+      final rr = avg(g
+          .where((r) =>
+              const ['stop', 'objetivo', 'tiempo'].contains(outOf(r)?['st']))
+          .map(rOf));
+      return SizedBox(
+        width: 200,
+        child: Text.rich(
+            TextSpan(children: [
+              TextSpan(
+                  text: 'n ${g.length}  ',
+                  style: const TextStyle(color: _cMuted)),
+              TextSpan(
+                  text: '${pc(m)} %',
+                  style: TextStyle(color: col(m), fontWeight: FontWeight.w600)),
+              if (orig)
+                TextSpan(
+                    text: '   R ${pc(rr)}', style: TextStyle(color: col(rr))),
+            ]),
+            textAlign: TextAlign.right,
+            style: const TextStyle(fontSize: 13)),
+      );
+    }
+
+    final dates = _trkDates();
+    final hLabel = 'T+$_trkH';
+    String stLabel(Map<String, dynamic> r) {
+      final o = outOf(r);
+      if (o == null)
+        return orig
+            ? 'pendiente'
+            : (r['trig1'] == null
+                ? '–'
+                : (r['trig1'] == true ? 'activó T+1' : 'no activó'));
+      return (o['st'] ?? '–').toString();
+    }
+
+    final table =
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        if (_trkDay == 'all') head('Fecha', 84, right: false),
+        head('Ticker', 70, right: false),
+        head('Empresa', 140, right: false),
+        head('Nota', 44),
+        const SizedBox(width: 10),
+        head('Clasificación', 110, right: false),
+        head('Entorno', 74, right: false),
+        head('RS', 40),
+        head('Entr.', 40),
+        head('Vela', 40),
+        head('Vol.', 40),
+        head('B/R', 40),
+        head('Hueco T+1', 72),
+        head('$hLabel %', 70),
+        head('vs sector', 70),
+        const SizedBox(width: 12),
+        head('Operación', 110, right: false),
+        head('R neto', 60),
+        const SizedBox(width: 14),
+        head('Factores observados', 360, right: false),
+      ]),
+      const Divider(height: 10, color: _cDivider),
+      for (final r in rows)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(children: [
+            if (_trkDay == 'all')
+              cell(_fmtDate('${r['day']}'), 84, right: false, c: _cMuted),
+            cell('${r['t']}', 70, right: false, fw: FontWeight.w700),
+            cell('${r['name'] ?? ''}', 140, right: false, c: _cMuted),
+            cell('${r['score'] ?? '–'}', 44, fw: FontWeight.w700),
+            const SizedBox(width: 10),
+            cell('${r['cls'] ?? '–'}', 110, right: false),
+            cell('${r['env'] ?? '–'}', 74,
+                right: false,
+                c: r['env'] == 'favorable'
+                    ? _kGreen
+                    : (r['env'] == 'adverso' ? _kRed : _cMuted)),
+            for (final k in ['sc_rs', 'sc_ent', 'sc_cdl', 'sc_vol', 'sc_rr'])
+              cell(_d(r[k]) == null ? '–' : _num(_d(r[k])!, 0), 40, c: _cMuted),
+            cell(pc(_d(r['gap1'])), 72,
+                c: col(_d(r['gap1']) == null
+                    ? null
+                    : _d(r['gap1'])! * (long ? 1 : -1))),
+            cell(pc(_d(r['mv'])), 70,
+                c: col(_d(r['fav'])), fw: FontWeight.w700),
+            cell(pc(_d(r['rel'])), 70, c: col(_d(r['rel']))),
+            const SizedBox(width: 12),
+            cell(stLabel(r), 110,
+                right: false,
+                c: outOf(r)?['st'] == 'stop'
+                    ? _kRed
+                    : (outOf(r)?['st'] == 'objetivo'
+                        ? _kGreen
+                        : (outOf(r)?['st'] == 'abierta' ? _kAmber : _cText))),
+            cell(
+                rOf(r) == null
+                    ? '–'
+                    : '${pc(rOf(r))}${outOf(r)?['st'] == 'abierta' ? '*' : ''}',
+                60,
+                c: col(rOf(r))),
+            const SizedBox(width: 14),
+            cell('${r['factors'] ?? ''}', 360, right: false, c: _kAmber),
+          ]),
+        ),
+    ]);
+
+    // Por clasificación
+    final clsOrder = [
+      'Prioridad alta',
+      'Candidata',
+      'Vigilar',
+      'Descartar',
+      'Descartar (B/R)'
+    ];
+    final byCls = <String, List<Map<String, dynamic>>>{};
+    for (final r in rows) {
+      (byCls[(r['cls'] ?? 'Sin nota').toString()] ??= []).add(r);
+    }
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Container(
+        color: _cBg,
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+        child: Wrap(
+            spacing: 10,
             runSpacing: 8,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              _calToggle(
-                  'EE. UU.',
-                  _calCountries.contains('USD'),
-                  () => setState(() {
-                        _calCountries.contains('USD')
-                            ? _calCountries.remove('USD')
-                            : _calCountries.add('USD');
-                      })),
-              _calToggle(
-                  'Zona euro',
-                  _calCountries.contains('EUR'),
-                  () => setState(() {
-                        _calCountries.contains('EUR')
-                            ? _calCountries.remove('EUR')
-                            : _calCountries.add('EUR');
-                      })),
-              const SizedBox(width: 10),
-              _calToggle('Importancia alta', _calHigh,
-                  () => setState(() => _calHigh = !_calHigh),
-                  color: _kRed),
-              _calToggle(
-                  'Media', _calMed, () => setState(() => _calMed = !_calMed),
-                  color: _kAmber),
-              const SizedBox(width: 10),
-              _calToggle('Resultados y ex-dividendos de mis valores', _calMine,
-                  () => setState(() => _calMine = !_calMine),
-                  color: _kEdit),
+              _calToggle('Lo que indicó (original)', orig, () {
+                setState(() => _trkView = 'orig');
+                _runTrack();
+              }),
+              _calToggle('Simulación con parámetros actuales', !orig, () {
+                setState(() => _trkView = 'sim');
+                _runTrack();
+              }),
+              const SizedBox(width: 8),
+              _calToggle('Largos', long, () {
+                setState(() => _trkMode = 'long');
+                _runTrack();
+              }, color: _kGreen),
+              _calToggle('Cortos', !long, () {
+                setState(() => _trkMode = 'short');
+                _runTrack();
+              }, color: _kRed),
+              const SizedBox(width: 8),
+              DropdownButton<String>(
+                value: (_trkDay == 'all' && orig && dates.length > 1) ||
+                        dates.contains(_trkDay)
+                    ? _trkDay
+                    : null,
+                hint: const Text('Sin cierres'),
+                dropdownColor: _cPanel,
+                items: [
+                  if (orig && dates.length > 1)
+                    const DropdownMenuItem(
+                        value: 'all',
+                        child: Text('Todos los días',
+                            style: TextStyle(fontSize: 14))),
+                  for (final d in dates)
+                    DropdownMenuItem(
+                        value: d,
+                        child: Text('Señales del ${_fmtDate(d)}',
+                            style: const TextStyle(fontSize: 14))),
+                ],
+                onChanged: _trkBusy
+                    ? null
+                    : (v) {
+                        setState(() => _trkDay = v);
+                        _runTrack();
+                      },
+              ),
+              for (final h in const [1, 5, 10, 15])
+                _calToggle('T+$h', _trkH == h, () {
+                  setState(() => _trkH = h);
+                  _runTrack();
+                }),
+              if (_trkBusy)
+                const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
             ]),
-        const SizedBox(height: 10),
-        Text(
-            'Hora de este dispositivo. Real en verde/rojo: por encima/por debajo de la previsión '
-            '(no indica si es bueno o malo). '
-            '${_calFred ? 'Dato real de EE. UU.: FRED.' : 'Sin clave de FRED: el dato real no se rellena.'}'
-            ' Agenda: Forex Factory.',
-            style: const TextStyle(fontSize: 12, color: _cMuted)),
-        const SizedBox(height: 14),
-        Row(children: [
-          head('Hora', 56),
-          head('', 60),
-          const Expanded(
-              child: Text('Evento',
-                  style: TextStyle(fontSize: 12, color: _cMuted))),
-          head('Real', 78, right: true),
-          head('Previsión', 78, right: true),
-          head('Anterior', 78, right: true),
-        ]),
-        if (days.isEmpty)
-          const Padding(
-            padding: EdgeInsets.only(top: 30),
-            child: Text(
-                'Sin eventos todavía: se rellenan con la próxima ejecución del job (nube o 22:30).',
-                style: TextStyle(color: _cMuted, fontSize: 14)),
-          ),
-        ...list,
-      ],
-    );
+      ),
+      const Divider(height: 1, color: _cDivider),
+      Expanded(
+        child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
+            children: [
+              Text(
+                  orig
+                      ? 'Lo que indicó el modelo aquella noche: nota, bloques, entrada, stop y objetivo guardados '
+                          'por la app al cargar ese cierre, con los parámetros de entonces. La operación la evalúa el '
+                          'job con velas diarias: orden válida solo en T+1; con hueco se ejecuta en la apertura (la '
+                          'pérdida puede pasar de −1R); si un mismo día toca entrada y stop (o stop y objetivo) la '
+                          'secuencia es «ambigua» y no cuenta; salida por tiempo a las 15 sesiones; R neto de '
+                          '0,10 % de costes. R con * = operación abierta (provisional).'
+                      : 'Simulación: los cierres guardados (últimas 40 sesiones) puntuados con tus parámetros '
+                          'actuales, para comparar versiones del modelo. Solo usa datos disponibles aquel día. Sin '
+                          'operación simulada: solo si T+1 activó la entrada.',
+                  style: const TextStyle(fontSize: 12, color: _cMuted)),
+              const SizedBox(height: 4),
+              Text(
+                  '$hLabel %: movimiento del valor desde el cierre de la señal (selección). Solo cuentan las '
+                  'señales que ya han completado ese horizonte.',
+                  style: const TextStyle(fontSize: 12, color: _cMuted)),
+              if (_trkErr != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 14),
+                  child: Text(_trkErr!, style: const TextStyle(color: _kRed)),
+                ),
+              if (dates.isEmpty && _trkErr == null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 24),
+                  child: Text(
+                      orig
+                          ? 'Todavía no hay señales guardadas con una sesión posterior. La app guarda las señales '
+                              'al cargar cada cierre (por la noche, tras el job de las 22:30) y el seguimiento '
+                              'empieza en la sesión siguiente.'
+                          : 'Todavía no hay cierres guardados con una sesión posterior.',
+                      style: const TextStyle(color: _cMuted, fontSize: 14)),
+                ),
+              if (rows.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Text('Selección ($hLabel)',
+                    style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: accent)),
+                const SizedBox(height: 6),
+                Wrap(spacing: 10, runSpacing: 10, children: [
+                  stat('Señales', '${rows.length}',
+                      sub:
+                          '$days día${days == 1 ? '' : 's'} distinto${days == 1 ? '' : 's'}'
+                          '${orig && rows.any((r) => r['rebuilt'] == true) ? ' · ${rows.where((r) => r['rebuilt'] == true).map((r) => r['day']).toSet().length} reconstruido(s)' : ''}'),
+                  stat('Con $hLabel completo', '${done.length}'),
+                  if (done.isNotEmpty)
+                    stat('A favor',
+                        '$nFav (${_num(nFav / done.length * 100, 0)} %)',
+                        c: nFav * 2 >= done.length ? _kGreen : _kRed),
+                  stat('Movimiento medio a favor',
+                      '${pc(avg(done.map((r) => _d(r['fav']))))} %',
+                      c: col(avg(done.map((r) => _d(r['fav']))))),
+                  stat('Frente a su sector',
+                      '${pc(avg(done.map((r) => _d(r['rel']))))} %',
+                      c: col(avg(done.map((r) => _d(r['rel']))))),
+                ]),
+                if (orig) ...[
+                  const SizedBox(height: 14),
+                  Text('Operación',
+                      style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w600,
+                          color: accent)),
+                  const SizedBox(height: 6),
+                  Wrap(spacing: 10, runSpacing: 10, children: [
+                    stat('Activaron la entrada', '${ops.length}',
+                        sub:
+                            'sin operación: ${rows.where((r) => outOf(r)?['st'] == 'sin operación').length}'),
+                    stat('Cerradas', '${closed.length}',
+                        sub:
+                            'stop ${closed.where((r) => outOf(r)?['st'] == 'stop').length} · objetivo '
+                            '${closed.where((r) => outOf(r)?['st'] == 'objetivo').length} · tiempo '
+                            '${closed.where((r) => outOf(r)?['st'] == 'tiempo').length}'),
+                    stat('R neto medio (cerradas)', pc(avg(closed.map(rOf))),
+                        c: col(avg(closed.map(rOf)))),
+                    stat('Abiertas', '${open.length}',
+                        sub: 'R provisional ${pc(avg(open.map(rOf)))}'),
+                    stat(
+                        'Ambiguas / repetidas',
+                        '${rows.where((r) => outOf(r)?['st'] == 'ambigua').length} / '
+                            '${rows.where((r) => outOf(r)?['st'] == 'repetida').length}',
+                        sub: 'repetida: ya había una operación abierta'),
+                  ]),
+                ],
+                const SizedBox(height: 18),
+                Text('Por clasificación',
+                    style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: accent)),
+                const SizedBox(height: 6),
+                for (final k
+                    in [...clsOrder, 'Sin nota'].where(byCls.containsKey))
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(children: [
+                      cell(k, 150, right: false),
+                      bucketCell(byCls[k]!)
+                    ]),
+                  ),
+                const SizedBox(height: 18),
+                Text('Relación entre bloques y resultados',
+                    style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: accent)),
+                const Text(
+                    'Para cada bloque, señales con puntuación baja (< 1/3 de su peso), media o alta (≥ 2/3): '
+                    'número, movimiento medio a favor en el horizonte y R neto de las cerradas. Es '
+                    'exploratorio: con pocas observaciones las diferencias pueden ser azar o contexto. Lo que '
+                    'buscamos es que más puntos se asocien de forma consistente con mejores resultados.',
+                    style: TextStyle(fontSize: 12, color: _cMuted)),
+                const SizedBox(height: 6),
+                Row(children: [
+                  head('Bloque', 150, right: false),
+                  head('Bajo', 200),
+                  head('Medio', 200),
+                  head('Alto', 200),
+                ]),
+                for (final b in blocks)
+                  Builder(builder: (_) {
+                    final k = b[0] as String, w = b[2] as double;
+                    double fr(Map<String, dynamic> r) =>
+                        (_d(r[k]) ?? 0) / (w <= 0 ? 1 : w);
+                    final g = done;
+                    final lo = k == 'score'
+                        ? g.where((r) => (_d(r[k]) ?? 0) < 70).toList()
+                        : g.where((r) => fr(r) < 1 / 3).toList();
+                    final mid = k == 'score'
+                        ? g
+                            .where((r) =>
+                                (_d(r[k]) ?? 0) >= 70 && (_d(r[k]) ?? 0) < 80)
+                            .toList()
+                        : g
+                            .where((r) => fr(r) >= 1 / 3 && fr(r) < 2 / 3)
+                            .toList();
+                    final hiG = k == 'score'
+                        ? g.where((r) => (_d(r[k]) ?? 0) >= 80).toList()
+                        : g.where((r) => fr(r) >= 2 / 3).toList();
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Row(children: [
+                        cell(
+                            k == 'score'
+                                ? 'Nota total (<70 / 70–79 / ≥80)'
+                                : b[1] as String,
+                            150,
+                            right: false),
+                        bucketCell(lo),
+                        bucketCell(mid),
+                        bucketCell(hiG),
+                      ]),
+                    );
+                  }),
+                const SizedBox(height: 20),
+                Text('Detalle por señal',
+                    style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: accent)),
+                const SizedBox(height: 6),
+                SingleChildScrollView(
+                    scrollDirection: Axis.horizontal, child: table),
+              ],
+            ]),
+      ),
+    ]);
   }
 
   // ---------------------------------------------------- UI
@@ -5299,6 +6358,8 @@ class _HomeState extends State<_Home> {
       body = _portfolioView();
     } else if (_tab == 3) {
       body = _calendarView();
+    } else if (_tab == 4) {
+      body = _trackView();
     } else {
       body = _sectorsView();
     }
@@ -5494,6 +6555,7 @@ class _HomeState extends State<_Home> {
       _tabBtn(1, 'Sectores e índices'),
       if (_pfAllowed) _tabBtn(2, 'Cartera'),
       _tabBtn(3, 'Calendario'),
+      _tabBtn(4, 'Seguimiento'),
     ];
     if (wide) {
       return Container(
