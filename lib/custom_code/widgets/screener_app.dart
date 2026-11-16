@@ -2063,6 +2063,26 @@ double? _parse(String s) {
   return double.tryParse(t);
 }
 
+/// Ficha de empresa guardada en el dispositivo (para verla sin conexión).
+Future<void> _infoCachePut(String t, Map<String, dynamic> body) async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    final m = Map<String, dynamic>.from(body)..remove('chart');
+    await p.setString('scr_info_$t', jsonEncode(m));
+  } catch (_) {}
+}
+
+Future<Map<String, dynamic>?> _infoCacheGet(String t) async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    final s = p.getString('scr_info_$t');
+    if (s == null) return null;
+    return Map<String, dynamic>.from(jsonDecode(s) as Map);
+  } catch (_) {
+    return null;
+  }
+}
+
 const _kMesL = [
   'enero',
   'febrero',
@@ -3112,31 +3132,199 @@ class _HomeState extends State<_Home> {
     }
   }
 
+  bool _dlBusy = false;
+  int _dlDone = 0, _dlTotal = 0;
+  String _dlWhat = 'Gráficos';
+
+  /// Fichas de empresa (descripción, resultados, analistas) de esos valores, guardadas en el
+  /// dispositivo. Devuelve cuántas se han guardado.
+  Future<int> _downloadInfos(List<String> ts) async {
+    final user = fba.FirebaseAuth.instance.currentUser;
+    if (user == null) return 0;
+    final token = await user.getIdToken();
+    var ok = 0;
+    for (var i = 0; i < ts.length; i += 3) {
+      await Future.wait(ts.skip(i).take(3).map((t) async {
+        try {
+          final res = await http
+              .post(Uri.parse(_kDetailUrl),
+                  headers: {
+                    'Authorization': 'Bearer $token',
+                    'Content-Type': 'application/json'
+                  },
+                  body: jsonEncode({'ticker': t}))
+              .timeout(const Duration(seconds: 60));
+          final body = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
+          if (body['status'] == 'ok') {
+            await _infoCachePut(t, body);
+            ok++;
+          }
+        } catch (_) {}
+      }));
+      if (mounted) setState(() => _dlDone = math.min(i + 3, ts.length));
+    }
+    return ok;
+  }
+
+  /// Señales guardadas y sus resultados: quedan en el dispositivo para el Seguimiento.
+  Future<void> _downloadTracking() async {
+    final uid = _uid;
+    final db = cf.FirebaseFirestore.instance;
+    await db.collection('screener').doc('hist_index').get();
+    if (uid == null) return;
+    final q = await db.collection('users').doc(uid).collection('signals').get();
+    try {
+      await db
+          .collection('users')
+          .doc(uid)
+          .collection('signals')
+          .doc('_params')
+          .get();
+    } catch (_) {}
+    final days = <String>{};
+    for (final d in q.docs) {
+      final a = d.data()['asof'];
+      if (a != null) days.add(a.toString());
+    }
+    for (final day in days) {
+      try {
+        await db.collection('screener').doc('hist_${day}_fwd').get();
+      } catch (_) {}
+    }
+  }
+
+  /// Lee del servidor los gráficos indicados para que queden en el dispositivo (caché de
+  /// Firestore). Se salta los que ya están guardados con la última vela. Devuelve
+  /// [descargados, fallidos].
+  Future<List<int>> _downloadCharts(List<String> ts,
+      {bool progress = false}) async {
+    final db = cf.FirebaseFirestore.instance;
+    var got = 0, bad = 0;
+    for (var i = 0; i < ts.length; i += 20) {
+      await Future.wait(ts.skip(i).take(20).map((t) async {
+        final ref =
+            db.collection('screener_charts').doc(t.replaceAll('/', '_'));
+        try {
+          final want = _chartDates[t];
+          if (want != null) {
+            try {
+              final c =
+                  await ref.get(const cf.GetOptions(source: cf.Source.cache));
+              final raw = c.data()?['data'];
+              if (raw is String && raw.contains('"$want"'))
+                return; // ya está al día
+            } catch (_) {}
+          }
+          final d =
+              await ref.get(const cf.GetOptions(source: cf.Source.server));
+          if (d.exists) {
+            got++;
+          } else {
+            bad++;
+          }
+        } catch (_) {
+          bad++;
+        }
+      }));
+      if (progress && mounted) {
+        setState(() => _dlDone = math.min(i + 20, ts.length));
+      }
+    }
+    return [got, bad];
+  }
+
+  /// Fechas de los gráficos guardados (todos los valores) y lista de los que hay.
+  Future<List<String>> _loadChartMeta() async {
+    final meta = await cf.FirebaseFirestore.instance
+        .collection('screener_meta')
+        .doc('charts')
+        .get();
+    final dm = (meta.data()?['dates'] as Map?) ?? {};
+    if (mounted) {
+      setState(() {
+        _chartDates = {
+          for (final e in dm.entries)
+            if (e.value != null) e.key.toString(): e.value.toString()
+        };
+        _applyChartDates();
+      });
+    }
+    return ((meta.data()?['tickers'] as List?) ?? [])
+        .map((e) => e.toString())
+        .toList();
+  }
+
+  /// Al cargar datos: deja en el dispositivo los gráficos de cartera, favoritos y de los
+  /// valores de los filtros (actuales y anteriores). El resto, con «Descargar todo».
   Future<void> _prefetchCharts() async {
     try {
-      final db = cf.FirebaseFirestore.instance;
-      final meta = await db.collection('screener_meta').doc('charts').get();
-      final dm = (meta.data()?['dates'] as Map?) ?? {};
+      final all = (await _loadChartMeta()).toSet();
+      if (kIsWeb) return; // sin conexión solo en la app instalada
+      final prio = <String>{
+        if (_pfAllowed)
+          ..._pf.map((p) => p['ticker']?.toString()).whereType<String>(),
+        for (final m in _favs.values) ...m,
+        ..._chartCands,
+      }.where(all.contains).toList();
+      await _downloadCharts(prio);
+    } catch (_) {}
+  }
+
+  /// «Descargar todo» (para viajar sin conexión): los gráficos de TODOS los valores.
+  Future<void> _downloadAll() async {
+    if (_dlBusy) return;
+    if (kIsWeb) {
+      _toast(
+          'La descarga para ver sin conexión solo funciona en la app del iPad.');
+      return;
+    }
+    setState(() {
+      _dlBusy = true;
+      _dlDone = 0;
+      _dlTotal = 0;
+    });
+    try {
+      final all = await _loadChartMeta();
       if (mounted) {
         setState(() {
-          _chartDates = {
-            for (final e in dm.entries)
-              if (e.value != null) e.key.toString(): e.value.toString()
-          };
-          _applyChartDates();
+          _dlWhat = 'Gráficos';
+          _dlTotal = all.length;
         });
       }
-      if (kIsWeb) return; // sin conexión solo en la app instalada
-      final ts = ((meta.data()?['tickers'] as List?) ?? [])
-          .map((e) => e.toString())
-          .toList();
-      for (var i = 0; i < ts.length; i += 20) {
-        await Future.wait(ts.skip(i).take(20).map((t) => db
-            .collection('screener_charts')
-            .doc(t.replaceAll('/', '_'))
-            .get()));
+      final res = await _downloadCharts(all, progress: true);
+      // Fichas de empresa de cartera y favoritos
+      final mine = <String>{
+        if (_pfAllowed)
+          ..._pf.map((p) => p['ticker']?.toString()).whereType<String>(),
+        for (final m in _favs.values) ...m,
+      }.toList();
+      if (mounted) {
+        setState(() {
+          _dlWhat = 'Fichas';
+          _dlDone = 0;
+          _dlTotal = mine.length;
+        });
       }
-    } catch (_) {}
+      final fichas = await _downloadInfos(mine);
+      // Seguimiento (señales originales y resultados)
+      if (mounted) {
+        setState(() {
+          _dlWhat = 'Seguimiento';
+          _dlTotal = 0;
+        });
+      }
+      try {
+        await _downloadTracking();
+      } catch (_) {}
+      final ok = all.length - res[1];
+      _toast(res[1] == 0
+          ? 'Listo para ver sin conexión: ${all.length} gráficos (${res[0]} descargados ahora), '
+              '$fichas fichas de cartera y favoritos y el Seguimiento. ${_asofLabel()}.'
+          : 'Gráficos: $ok de ${all.length}; ${res[1]} han fallado. Revisa la conexión y repite.');
+    } catch (e) {
+      _toast('No se pudo descargar: $e');
+    }
+    if (mounted) setState(() => _dlBusy = false);
   }
 
   // ---------------------------------------------------- cartera IBKR
@@ -5573,11 +5761,16 @@ class _HomeState extends State<_Home> {
   /// Resultados posteriores de un cierre (los calcula el job): ticker -> [c0, o1, h1, l1, r1, r5, r10, r15]
   Future<Map<String, List?>?> _fwd(String day) async {
     if (_fwdCache.containsKey(day)) return _fwdCache[day];
-    final d = await cf.FirebaseFirestore.instance
-        .collection('screener')
-        .doc('hist_${day}_fwd')
-        .get();
-    final raw = d.data()?['data'];
+    dynamic raw;
+    try {
+      final d = await cf.FirebaseFirestore.instance
+          .collection('screener')
+          .doc('hist_${day}_fwd')
+          .get();
+      raw = d.data()?['data'];
+    } catch (_) {
+      return null; // sin conexión y sin copia en el dispositivo
+    }
     final m = raw is String
         ? (jsonDecode(raw) as Map)
             .map((k, v) => MapEntry(k.toString(), v as List?))
@@ -5849,7 +6042,10 @@ class _HomeState extends State<_Home> {
         }
       }
       _sigDocs = sig;
-      await _rebuildMissing(ds);
+      try {
+        await _rebuildMissing(
+            ds); // sin conexión puede no poder: se deja para otra vez
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _histDates = ds
@@ -6570,10 +6766,13 @@ class _HomeState extends State<_Home> {
         ],
         [
           'Gráficos sin conexión',
-          'Solo en la app del iPad. Cada noche se guardan los gráficos de cartera, '
-              'favoritos y de los valores que salen con tus filtros (los actuales y los anteriores, hasta 320 en '
-              'total); el iPad los descarga al abrir la app con conexión. La columna «Gráfico offline» indica '
-              'la fecha de la última vela guardada.'
+          'Solo en la app del iPad. Al abrir la app con conexión se descargan los '
+              'gráficos de cartera, favoritos y de los valores de tus filtros (actuales y anteriores). El botón '
+              'del avión descarga los de TODOS los valores: úsalo con wifi antes de viajar (unos 30 MB). La '
+              'columna «Gráfico offline» indica la fecha de la última vela guardada en la nube. El avión guarda '
+              'también las fichas de empresa de cartera y favoritos (y queda guardada la de cualquier valor que '
+              'abras con conexión) y el Seguimiento (vista original). Sin conexión no funcionan «Actualizar '
+              'precios», la nube ni la Simulación del Seguimiento.'
         ],
       ],
     ],
@@ -6945,6 +7144,21 @@ class _HomeState extends State<_Home> {
             color: _jobRunning ? _cMuted : _cText),
         onPressed: (_loading || _jobRunning) ? null : _runNow,
       ),
+      if (_dlBusy)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Text(
+              _dlTotal == 0 ? '$_dlWhat…' : '$_dlWhat $_dlDone/$_dlTotal',
+              style: const TextStyle(fontSize: 13, color: _kAmber)),
+        )
+      else
+        IconButton(
+          tooltip:
+              'Descargar todo para verlo sin conexión: gráficos de todos los valores, fichas de '
+              'cartera y favoritos y Seguimiento',
+          icon: const Icon(Icons.airplanemode_active, size: 21, color: _cText),
+          onPressed: _loading ? null : _downloadAll,
+        ),
       if (_newData)
         Padding(
           padding: const EdgeInsets.only(right: 6),
@@ -9277,6 +9491,14 @@ class _DetailState extends State<_Detail> {
     final user = fba.FirebaseAuth.instance.currentUser;
     final t = (widget.row['ticker'] ?? '').toString();
     if (user == null || t.isEmpty) return;
+    // Si hay una ficha guardada en el dispositivo se enseña ya (sirve sin conexión)
+    final saved = await _infoCacheGet(t);
+    if (saved != null && mounted) {
+      setState(() {
+        _info = saved;
+        _infoLoading = false;
+      });
+    }
     try {
       final token = await user.getIdToken();
       final res = await http
@@ -9288,6 +9510,7 @@ class _DetailState extends State<_Detail> {
               body: jsonEncode({'ticker': t, 'chart': true}))
           .timeout(const Duration(seconds: 60));
       final body = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
+      if (body['status'] == 'ok') _infoCachePut(t, body);
       if (!mounted) return;
       setState(() {
         _infoLoading = false;
@@ -9310,7 +9533,7 @@ class _DetailState extends State<_Detail> {
         }
         if (body['status'] == 'ok') {
           _info = body;
-        } else {
+        } else if (_info == null) {
           _infoErr = (body['msg'] ?? 'error ${res.statusCode}').toString();
         }
       });
@@ -9318,7 +9541,8 @@ class _DetailState extends State<_Detail> {
       if (mounted) {
         setState(() {
           _infoLoading = false;
-          _infoErr = e.toString();
+          if (_info == null)
+            _infoErr = e.toString(); // sin conexión se queda la guardada
         });
       }
     }
