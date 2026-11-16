@@ -3284,6 +3284,9 @@ class _HomeState extends State<_Home> {
       _dlTotal = 0;
     });
     try {
+      // Primero los datos más recientes guardados (lo mismo que «Datos nuevos · Cargar»)
+      if (mounted) setState(() => _dlWhat = 'Datos');
+      await _load();
       final all = await _loadChartMeta();
       if (mounted) {
         setState(() {
