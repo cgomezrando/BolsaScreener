@@ -904,8 +904,12 @@ List<_Field> _buildFields() {
       w: 80, h: 'Pasa filtros');
   t('score_cls', 'Clasificación por puntuación', _cPlan,
       w: 120, h: 'Clasificación');
-  t('setup', 'Entrada preparada (nota, entrada, vela y B/R cumplen)', _cPlan,
-      w: 110, h: 'Preparada');
+  t(
+      'setup',
+      'Entrada preparada (nota, entrada, vela y B/R cumplen); si no, qué falta',
+      _cPlan,
+      w: 150,
+      h: 'Preparada');
   t(
       'env',
       'Entorno para esta dirección (índice y sector frente a su EMA50 y su pendiente)',
@@ -1178,9 +1182,12 @@ const Map<String, List<String>> _kDefaultCols = {
     'name',
     'market',
     'score',
+    'score_cls',
+    'setup',
     'discard',
     'price',
     'chg_today',
+    'r_1w',
     'pre_pct',
     'pre_state',
     'score_pre',
@@ -1191,12 +1198,10 @@ const Map<String, List<String>> _kDefaultCols = {
     'p_rr',
     'p_shares',
     'p_risk',
-    'a_ema20',
-    'rs_sec_3m',
-    'rs_idx_1m',
+    'ent_atr',
+    'env',
     'vol_rel',
     'dvol_m',
-    'adx',
     'earn_bd'
   ],
   'short': [
@@ -1204,9 +1209,12 @@ const Map<String, List<String>> _kDefaultCols = {
     'name',
     'market',
     'score',
+    'score_cls',
+    'setup',
     'discard',
     'price',
     'chg_today',
+    'r_1w',
     'pre_pct',
     'pre_state',
     'score_pre',
@@ -1217,12 +1225,10 @@ const Map<String, List<String>> _kDefaultCols = {
     'p_rr',
     'p_shares',
     'p_risk',
-    'a_ema20',
-    'rs_sec_3m',
-    'rs_idx_1m',
+    'ent_atr',
+    'env',
     'vol_rel',
     'dvol_m',
-    'adx',
     'earn_bd',
     'div_yield',
     'days_to_exdiv',
@@ -1630,9 +1636,9 @@ const List<_RuleSpec> _kRuleSpecs = [
       unit: '%',
       dec: 1,
       help:
-          'Antes de la apertura mira la pre-apertura (EE. UU.); desde la apertura, el Hoy %. '
+          'Antes de la apertura mira la pre-apertura (EE. UU.); con la sesión abierta, el Hoy %. '
           'Largos: descarta si baja más de este %. Cortos: si sube más. 0 = cualquier movimiento en '
-          'contra. Sin dato de hoy no descarta.'),
+          'contra. Con el mercado cerrado o sin dato de hoy no descarta.'),
   _RuleSpec('vix', 'VIX máximo', 'VIX ≤ {v}',
       dec: 1,
       only: 'long',
@@ -1644,14 +1650,14 @@ const List<_RuleSpec> _kRuleSpecs = [
       dec: 1,
       help:
           'Pre-apertura del SPY. Largos: no pasan si baja más de este %. Cortos: si sube más. '
-          'Solo valores de EE. UU.; sin dato (fuera de 10:00–15:30) no descarta.'),
+          'Solo valores de EE. UU. y solo durante el pre-market (10:00–15:30 hora de España).'),
   _RuleSpec(
       'ind_dir', 'Industria en contra, como máximo', 'Industria no bajando',
       unit: '%',
       dec: 1,
       help:
-          'ETF de la industria del valor (en Europa, el de su sector): su pre-apertura si la hay; '
-          'si no, la variación de hoy o de la última sesión. Largos: no pasan si baja más de este %. '
+          'ETF de la industria del valor (en Europa, el de su sector): su pre-apertura durante el '
+          'pre-market; si no, la variación de hoy o de la última sesión. Largos: no pasan si baja más de este %. '
           'Cortos: si sube más.'),
   _RuleSpec('earn', 'Resultados a más de', 'Resultados a más de {v} días',
       unit: 'días'),
@@ -2605,6 +2611,7 @@ class _HomeState extends State<_Home> {
     _ensurePfChg();
     _ensurePre();
     _ensurePreScore();
+    _ensure1w();
     _save();
     _riskCtl.text = _plain(_riskM);
     _maxCtl.text = _plain(_maxPosM);
@@ -2755,6 +2762,9 @@ class _HomeState extends State<_Home> {
           .where(_kFieldMap.containsKey)
           .toList();
       if (pfc != null && pfc.isNotEmpty) _pfCols = pfc;
+      // Lista acumulada de gráficos offline (filtros actuales y anteriores)
+      final chl = (j['chart'] as List?)?.map((e) => e.toString()).toList();
+      if (chl != null && chl.isNotEmpty) _chartCands = chl;
     } catch (_) {}
   }
 
@@ -2806,7 +2816,8 @@ class _HomeState extends State<_Home> {
     final uid = _uid;
     if (uid == null) return;
     try {
-      _chartCands = _computeChartCands(); // con los filtros actuales
+      _chartCands = _mergeChartCands(
+          _computeChartCands()); // filtros actuales + anteriores
       await cf.FirebaseFirestore.instance.collection('users').doc(uid).set({
         'data': jsonEncode(_settingsJson()),
         'updated_ms': DateTime.now().millisecondsSinceEpoch,
@@ -3008,11 +3019,13 @@ class _HomeState extends State<_Home> {
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
         _calFred = cal['fred'] == true;
-        _applyGroupBetas();
-        _computePlans();
         _asof = (j['asof'] ?? '').toString();
         _snapMode = (j['mode'] ?? 'close').toString();
         _updatedIso = (j['updated'] ?? '').toString();
+        _liveAt = null; // los precios en directo eran del snapshot anterior
+        _pfLive = null;
+        _applyGroupBetas();
+        _computePlans();
         _newData = false;
         _loading = false;
       });
@@ -3047,7 +3060,7 @@ class _HomeState extends State<_Home> {
   /// Lista para los gráficos offline: los valores que salen con tus filtros en Largos y
   /// en Cortos (hasta 120 de cada uno, en el orden de la tabla) + los mejores candidatos.
   List<String> _computeChartCands() {
-    if (_rows.isEmpty) return _chartCands;
+    if (_rows.isEmpty) return const [];
     final cur = _mode;
     final out = <String>[];
     for (final m in const ['long', 'short']) {
@@ -3060,11 +3073,27 @@ class _HomeState extends State<_Home> {
     }
     _mode = cur;
     _computePlans();
-    return out.toSet().toList()..sort();
+    return out.toSet().toList();
+  }
+
+  static const int _kChartKeep =
+      280; // el job guarda hasta 320 con cartera y favoritos
+
+  /// Los de los filtros actuales primero y, detrás, los de filtros anteriores (los más
+  /// recientes antes), hasta [_kChartKeep]: al cambiar de filtro no se pierden los gráficos
+  /// que ya se estaban guardando.
+  List<String> _mergeChartCands(List<String> now) {
+    final out = <String>[...now];
+    final seen = now.toSet();
+    for (final t in _chartCands) {
+      if (out.length >= _kChartKeep) break;
+      if (seen.add(t)) out.add(t);
+    }
+    return out.length > _kChartKeep ? out.sublist(0, _kChartKeep) : out;
   }
 
   void _updateChartCands() {
-    final l = _computeChartCands();
+    final l = _mergeChartCands(_computeChartCands());
     if (l.join(',') != _chartCands.join(',')) {
       _chartCands = l;
       _schedulePush();
@@ -3987,8 +4016,56 @@ class _HomeState extends State<_Home> {
     _score(_rows);
   }
 
+  // Horario de verano: UE (último domingo de marzo–octubre, 01:00 UTC) y EE. UU.
+  // (2.º domingo de marzo 07:00 UTC – 1.er domingo de noviembre 06:00 UTC).
+  static bool _dstEu(DateTime u) {
+    DateTime lastSun(int m) {
+      final d = DateTime.utc(u.year, m + 1, 0);
+      return d
+          .subtract(Duration(days: d.weekday % 7))
+          .add(const Duration(hours: 1));
+    }
+
+    return !u.isBefore(lastSun(3)) && u.isBefore(lastSun(10));
+  }
+
+  static bool _dstUs(DateTime u) {
+    DateTime nthSun(int m, int n, int h) {
+      final d = DateTime.utc(u.year, m, 1);
+      return d
+          .add(Duration(days: (7 - d.weekday % 7) % 7 + 7 * (n - 1), hours: h));
+    }
+
+    return !u.isBefore(nthSun(3, 2, 7)) && u.isBefore(nthSun(11, 1, 6));
+  }
+
+  /// Minutos desde medianoche en la hora local del mercado, o null en fin de semana.
+  static int? _mktMinutes(bool eu) {
+    final u = DateTime.now().toUtc();
+    final loc = u
+        .add(Duration(hours: eu ? (_dstEu(u) ? 2 : 1) : (_dstUs(u) ? -4 : -5)));
+    if (loc.weekday >= 6) return null;
+    return loc.hour * 60 + loc.minute;
+  }
+
+  /// ¿Sesión abierta ahora? Europa 9:00–17:35 (CET); EE. UU. 9:30–16:00 (Nueva York).
+  static bool _sessionOpen(bool eu) {
+    final m = _mktMinutes(eu);
+    if (m == null) return false;
+    return eu ? (m >= 540 && m < 1055) : (m >= 570 && m < 960);
+  }
+
+  /// ¿Pre-market de EE. UU. ahora? 4:00–9:30 (Nueva York).
+  static bool _usPreNow() {
+    final m = _mktMinutes(false);
+    return m != null && m >= 240 && m < 570;
+  }
+
   /// Filtros duros del swing de 2 semanas (editables en «Filtros duros»).
   /// Devuelve el primer motivo de descarte o null.
+  /// Los filtros de contexto del día (pre-apertura del S&P, de la industria y del valor, y
+  /// «Hoy %») solo actúan con el pre-market o la sesión en curso: tras el cierre la lista no
+  /// depende de la hora a la que se mire.
   String? _swingFail(Map<String, dynamic> r, bool long) {
     final m = long ? 'long' : 'short';
     double? g(String k) => _d(r[k]);
@@ -4069,8 +4146,10 @@ class _HomeState extends State<_Home> {
       if (v != null && v > vixMax)
         return 'VIX ${_num(v, 1)} (> ${n0(vixMax, 1)})';
     }
+    final isEu = r['currency'] == 'EUR';
+    final preNow = _usPreNow();
     final idxTol = on('idx_pre');
-    if (idxTol != null && r['currency'] != 'EUR') {
+    if (idxTol != null && !isEu && preNow) {
       final sp = _d((_bench['SPY'] as Map?)?['pre_pct']);
       if (sp != null && (long ? sp < -idxTol : sp > idxTol)) {
         return 'S&P en pre-apertura ${sp > 0 ? '+' : ''}${_num(sp, 2)} % en contra';
@@ -4084,7 +4163,7 @@ class _HomeState extends State<_Home> {
               ? _industries[r['ind_etf']]
               : null) as Map? ??
           secs[r['sector']] as Map?;
-      final pp = _d(grp?['pre_pct']);
+      final pp = (!eu && preNow) ? _d(grp?['pre_pct']) : null;
       final mv = pp ?? _d(grp?['chg_1d']);
       if (mv != null && (long ? mv < -indTol : mv > indTol)) {
         final etf = (grp?['etf'] ?? r['ind_etf'] ?? '').toString();
@@ -4094,9 +4173,10 @@ class _HomeState extends State<_Home> {
     }
     final preTol = on('pre');
     if (preTol != null) {
-      // Con sesión de hoy abierta manda el Hoy %; antes de abrir, la pre-apertura.
-      final hoy = g('chg_today');
-      final mv = hoy ?? g('pre_pct');
+      // Con la sesión de hoy abierta manda el Hoy %; antes de abrir, la pre-apertura.
+      // Con el mercado cerrado no se aplica (la vela ya terminada la valora la puntuación).
+      final hoy = _sessionOpen(isEu) ? g('chg_today') : null;
+      final mv = hoy ?? ((!isEu && preNow) ? g('pre_pct') : null);
       if (mv != null && (long ? mv < -preTol : mv > preTol)) {
         return '${hoy != null ? 'hoy' : 'pre-apertura'} ${mv > 0 ? '+' : ''}${_num(mv, 2)} % en contra';
       }
@@ -4187,6 +4267,21 @@ class _HomeState extends State<_Home> {
         .where((sp) => (sp.only == null || sp.only == m) && _rule(m, sp.key).on)
         .toList();
     final ok = _rows.where((r) => r['swing_ok'] == true).length;
+    // Motivos de descarte más frecuentes (el primer filtro que falla en cada valor)
+    final why = <String, int>{};
+    final numRe = RegExp(r'\(?[+\-−]?\d+([.,]\d+)?\)?');
+    for (final r in _rows) {
+      final d = r['discard']?.toString();
+      if (d == null || d.isEmpty || r['swing_ok'] == true) continue;
+      final k = d
+          .replaceAll(numRe, '')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .replaceAll(' %', '')
+          .trim();
+      why[k] = (why[k] ?? 0) + 1;
+    }
+    final top = why.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
       decoration: BoxDecoration(
@@ -4212,6 +4307,14 @@ class _HomeState extends State<_Home> {
           Text(
               'Pasan $ok de ${_rows.length}. Solo cuentan para la puntuación y el preset Swing.',
               style: const TextStyle(fontSize: 12, color: _cMuted)),
+          if (top.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            const Text('Descartados sobre todo por:',
+                style: TextStyle(fontSize: 12, color: _cMuted)),
+            for (final e in top.take(5))
+              Text('  ${e.value} · ${e.key}',
+                  style: const TextStyle(fontSize: 12, color: _kAmber)),
+          ],
           const SizedBox(height: 8),
           if (active.isEmpty)
             const Text('Ninguno activo.',
@@ -4241,7 +4344,7 @@ class _HomeState extends State<_Home> {
 
   /// Puntuación 0-100 sobre los valores que pasan los filtros duros.
   /// Pesos y umbrales editables («Editar puntuación»); se normaliza a 100 con la
-  /// suma de pesos y se multiplica por el semáforo de mercado.
+  /// suma de pesos. El entorno (mercado y sector) va en una columna aparte y no puntúa.
   void _score(List<Map<String, dynamic>> all) {
     final long = _mode == 'long';
     final m = long ? 'long' : 'short';
@@ -4369,12 +4472,14 @@ class _HomeState extends State<_Home> {
       r['sc_rr'] = scRr;
       r['ent_atr'] = dEnt;
       r['score_cls'] = cls(score, rr);
-      final ready = score >= p('cls_ok') &&
-          scEnt >= p('ent_w') * 0.4 &&
-          scCdl >= p('cdl_w') * 2 / 3 - 1e-9 &&
-          rr != null &&
-          rr >= p('rr_t3');
-      r['setup'] = ready ? 'preparada' : null;
+      // «Entrada preparada»: si no, qué condición falta
+      final miss = <String>[
+        if (score < p('cls_ok')) 'nota',
+        if (scEnt < p('ent_w') * 0.4) 'entrada',
+        if (scCdl < p('cdl_w') * 2 / 3 - 1e-9) 'vela',
+        if (rr == null || rr < p('rr_t3')) 'B/R',
+      ];
+      r['setup'] = miss.isEmpty ? 'preparada' : 'falta ${miss.join(', ')}';
 
       // ---- Pre-apertura: cómo queda el plan si abre al precio del pre-market
       final pre = _d(r['pre_px']);
@@ -4608,6 +4713,18 @@ class _HomeState extends State<_Home> {
       l.insert(i < 0 ? l.length : i + 1, 'pre_pct');
     }
     p.setBool('scr_pre_v1', true);
+  }
+
+  /// Añade una vez «Rentabilidad 1 semana %» tras «Hoy %» (Largos, Cortos y Cartera).
+  void _ensure1w() {
+    final p = _prefs;
+    if (p == null || (p.getBool('scr_r1w_v1') ?? false)) return;
+    for (final l in [_pfCols, _cols['long']!, _cols['short']!]) {
+      if (l.contains('r_1w')) continue;
+      final i = l.indexOf('chg_today');
+      l.insert(i < 0 ? l.length : i + 1, 'r_1w');
+    }
+    p.setBool('scr_r1w_v1', true);
   }
 
   /// Añade una vez «Pre-apertura plan» y «Punt. pre-apertura» tras «Pre-apertura %» (Largos y Cortos).
@@ -5542,11 +5659,25 @@ class _HomeState extends State<_Home> {
             r['price'],
             r['setup'],
             r['sec_etf'],
-            r['home_idx'],
+            r['currency'] == 'EUR'
+                ? (r['in_ibex'] == true ? '^IBEX' : '^GDAXI')
+                : 'SPY',
             r['currency'],
             r['days_to_earn'],
           ])
       .toList();
+
+  /// Hasta cuándo se pueden guardar las señales de un cierre: las 08:00 UTC (apertura
+  /// europea) del siguiente día laborable. Después ya ha empezado la sesión siguiente.
+  static DateTime? _sigCutoff(String asof) {
+    final d = DateTime.tryParse('${asof}T00:00:00Z');
+    if (d == null) return null;
+    var n = d.add(const Duration(days: 1));
+    while (n.weekday >= 6) {
+      n = n.add(const Duration(days: 1));
+    }
+    return n.add(const Duration(hours: 8));
+  }
 
   String? _paramsLogged;
 
@@ -5657,6 +5788,10 @@ class _HomeState extends State<_Home> {
         jsonEncode({'hard': _rulesToJson(), 'score': _scoreToJson()});
     _logParams(uid, params);
     if (_snapMode != 'close' || _asof.isEmpty || _rows.isEmpty) return;
+    // Solo datos de cierre puros: sin precios en directo mezclados y antes de la sesión siguiente
+    if (_lastPrices != null) return;
+    final cut = _sigCutoff(_asof);
+    if (cut == null || !DateTime.now().toUtc().isBefore(cut)) return;
     final key = '$_asof|${params.hashCode}';
     if (_sigSavedKey == key) return;
     _sigSavedKey = key;
@@ -5800,7 +5935,7 @@ class _HomeState extends State<_Home> {
           'px': r['price'],
           'setup': r['setup'],
           'sec_etf': r['sec_etf'],
-          'home_idx': r['home_idx'],
+          'home_idx': _homeIdx(r),
           'cur': r['currency'],
           'dte': r['days_to_earn'],
           'day': day,
@@ -6190,6 +6325,12 @@ class _HomeState extends State<_Home> {
                     width: 18,
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2)),
+              TextButton.icon(
+                style: TextButton.styleFrom(foregroundColor: _accent),
+                onPressed: _showHelp,
+                icon: const Icon(Icons.help_outline, size: 18),
+                label: const Text('Cómo leer esta página'),
+              ),
             ]),
       ),
       const Divider(height: 1, color: _cDivider),
@@ -6366,6 +6507,258 @@ class _HomeState extends State<_Home> {
             ]),
       ),
     ]);
+  }
+
+  // ---------------------------------------------------- ayuda
+
+  static const List<List<Object>> _kHelpPages = [
+    [
+      'Screener',
+      'Lista de valores con su plan de swing (1–3 semanas) a favor de tendencia, tras un retroceso a la EMA20.',
+      [
+        [
+          'Largos / Cortos',
+          'Cambia la dirección. Cada una tiene sus filtros, puntuación, riesgo y posición máxima.'
+        ],
+        [
+          'Filtros (izquierda)',
+          'Filtros de la tabla: solo ocultan filas. Los presets guardan combinaciones de filtros.'
+        ],
+        [
+          'Filtros duros (swing)',
+          'Requisitos para operar (tendencia, liquidez, resultados, VIX, pre-apertura, etc.). '
+              'Quien no los cumple no tiene puntuación y en «Descartado» ves el motivo. Se editan con «Editar». '
+              'Los de contexto del día (pre-apertura del S&P y del valor, «Hoy %») solo actúan durante el '
+              'pre-market o la sesión; con el mercado cerrado no descartan.'
+        ],
+        [
+          'Puntuación (0–100)',
+          'Solo para los que pasan los filtros duros. Suma de bloques: fuerza relativa '
+              'ajustada por volatilidad (30), entrada cerca de la EMA20 en ATR (20), vela señal (20), volumen (10) '
+              'y beneficio/riesgo (20). El «peso» es el máximo de puntos de cada bloque.'
+        ],
+        [
+          'Clasificación / Preparada',
+          'Prioridad alta ≥ 85, Candidata ≥ 80, Vigilar ≥ 70 (provisional). '
+              '«Preparada»: nota ≥ candidata, entrada a ≤ 1,5 ATR de la EMA20, vela con 2 de 3 condiciones y B/R ≥ 2; '
+              'si no, indica qué falta.'
+        ],
+        [
+          'Entorno',
+          'Índice y sector frente a su EMA50 y su pendiente: favorable, mixto o adverso. No suma puntos.'
+        ],
+        [
+          'Plan',
+          'Entrada: superar el máximo (cortos: perder el mínimo) de la última vela. Stop: el otro extremo '
+              'o la vela patrón. Acciones = riesgo ÷ distancia al stop, con tope de posición máxima.'
+        ],
+        [
+          'Pre-apertura',
+          'De 10:00 a 15:30 (EE. UU.): % del pre-market, cómo quedaría el plan si abre a ese '
+              'precio y su nota recalculada.'
+        ],
+        [
+          'Botones de arriba',
+          '«Actualizar precios»: precios en directo de lo visible, cartera e índices (no '
+              'recalcula el universo). Flecha circular: lo repite cada 2 minutos. Nube: vuelve a pasar todo el '
+              'screener en la nube con datos de ~15 min (tarda unos minutos).'
+        ],
+        [
+          'Columnas / Favoritos',
+          '«Columnas» añade, quita y ordena columnas; se pueden ensanchar arrastrando el '
+              'borde. La estrella marca favoritos; el icono de gráfico abre el gráfico.'
+        ],
+        [
+          'Gráficos sin conexión',
+          'Solo en la app del iPad. Cada noche se guardan los gráficos de cartera, '
+              'favoritos y de los valores que salen con tus filtros (los actuales y los anteriores, hasta 320 en '
+              'total); el iPad los descarga al abrir la app con conexión. La columna «Gráfico offline» indica '
+              'la fecha de la última vela guardada.'
+        ],
+      ],
+    ],
+    [
+      'Sectores e índices',
+      'Cómo están el mercado, los sectores y las industrias.',
+      [
+        [
+          'Mercados y macro',
+          'Futuros de índices, índices, bonos, materias primas y divisas.'
+        ],
+        [
+          'Sectores / Industrias',
+          'ETF de cada grupo: rentabilidades, distancia a sus EMAs, RSI, tendencia y '
+              'pre-apertura. Útil para ver qué grupos lideran o se quedan atrás.'
+        ],
+        [
+          'Semáforo',
+          'Arriba: régimen de EE. UU. y Europa (verde, ámbar, rojo) según índice, VIX y amplitud.'
+        ],
+      ],
+    ],
+    [
+      'Cartera',
+      'Tus posiciones de IBKR (solo posiciones, sin efectivo ni margen).',
+      [
+        [
+          'Datos',
+          'Precio medio, P&G y valor de mercado, más los datos técnicos y de resultados de cada valor.'
+        ],
+        [
+          'Actualizar precios',
+          'Pone la cartera a precio de mercado en directo.'
+        ],
+      ],
+    ],
+    [
+      'Calendario',
+      'Agenda macro de EE. UU. y zona euro y fechas de tus valores. Horas en tu zona horaria (CET en España).',
+      [
+        [
+          'Bancos centrales',
+          'Próximas decisiones de tipos de la Fed y el BCE.'
+        ],
+        [
+          'Real / Previsión / Anterior',
+          'El real sale en verde si supera la previsión y en rojo si se queda '
+              'por debajo (no indica si es bueno o malo). Las previsiones llegan cuando se publica la semana.'
+        ],
+        [
+          'Mis valores',
+          'Resultados (BPA previsto y anterior; real tras publicarse) y ex-dividendos de '
+              'favoritos y cartera.'
+        ],
+      ],
+    ],
+    [
+      'Seguimiento',
+      'Comprueba si las señales funcionaron: compara lo que indicó el modelo un día con lo que hicieron '
+          'los valores después. Sirve para mejorar el modelo, no para un día suelto.',
+      [
+        [
+          'Original / Simulación',
+          '«Lo que indicó»: las señales tal como salieron aquella noche (con los '
+              'parámetros de entonces). «Simulación»: los mismos días puntuados con tus parámetros actuales, '
+              'para comparar versiones del modelo.'
+        ],
+        [
+          'Día y horizonte',
+          'Elige un día de señales (o «Todos los días») y un horizonte: T+1, T+5, T+10 o '
+              'T+15 sesiones después. Solo cuentan las señales que ya han completado ese horizonte.'
+        ],
+        [
+          'Selección',
+          '¿Acertó eligiendo valores? Movimiento del valor desde el cierre de la señal '
+              '(en cortos, bajar es a favor) y frente a su sector. Ejemplo: «A favor 60 %» = 6 de cada 10 se '
+              'movieron en la dirección buena.'
+        ],
+        [
+          'Operación',
+          '¿Habría ganado dinero el plan? Si la entrada se activó al día siguiente y cómo acabó: '
+              'stop, objetivo o salida por tiempo a las 15 sesiones. R = ganancia en unidades de riesgo '
+              '(+2R = el doble de lo arriesgado; −1R = saltó el stop), neto de costes. «Ambigua»: el mismo día '
+              'tocó entrada y stop y no se sabe el orden. «Repetida»: ya había una operación abierta.'
+        ],
+        [
+          'Por clasificación',
+          'Los mismos resultados por Prioridad alta, Candidata, Vigilar… Lo deseable '
+              'es que las clasificaciones altas den mejores resultados.'
+        ],
+        [
+          'Bloques y resultados',
+          'Para cada bloque de la nota, compara señales con pocos, medios y muchos '
+              'puntos. Si un bloque funciona, «Alto» debería dar mejor resultado que «Bajo» de forma repetida '
+              'en muchos días. Con pocas señales, las diferencias pueden ser casualidad.'
+        ],
+        [
+          'Detalle y factores',
+          'Una fila por señal. «Factores observados» (cuando fue en contra) señala '
+              'lo que acompañó: mercado o sector en contra, hueco, no activó, stop, bloque débil… No prueba la '
+              'causa, da pistas.'
+        ],
+        [
+          'Cómo usarlo',
+          '1) Las primeras semanas, busca errores evidentes. 2) Con varios meses, mira '
+              '«Todos los días» a T+5 y T+10. 3) Antes de cambiar pesos, compáralos en la Simulación.'
+        ],
+      ],
+    ],
+  ];
+
+  void _showHelp() {
+    final int open = _tab.clamp(0, _kHelpPages.length - 1).toInt();
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: _cPanel,
+        insetPadding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 820, maxHeight: 760),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(22, 18, 10, 6),
+              child: Row(children: [
+                const Expanded(
+                  child: Text('Ayuda',
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+                ),
+                IconButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close)),
+              ]),
+            ),
+            Expanded(
+              child: ListView(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 18),
+                  children: [
+                    for (var i = 0; i < _kHelpPages.length; i++)
+                      Theme(
+                        data: Theme.of(ctx)
+                            .copyWith(dividerColor: Colors.transparent),
+                        child: ExpansionTile(
+                          initiallyExpanded: i == open,
+                          iconColor: _cText,
+                          collapsedIconColor: _cMuted,
+                          title: Text(_kHelpPages[i][0] as String,
+                              style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: i == open ? _accent : _cText)),
+                          subtitle: Text(_kHelpPages[i][1] as String,
+                              style: const TextStyle(
+                                  fontSize: 13, color: _cMuted)),
+                          childrenPadding:
+                              const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                          children: [
+                            for (final it in (_kHelpPages[i][2] as List))
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: Text.rich(
+                                    TextSpan(children: [
+                                      TextSpan(
+                                          text: '${(it as List)[0]}: ',
+                                          style: const TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                              color: _cText)),
+                                      TextSpan(
+                                          text: it[1] as String,
+                                          style:
+                                              const TextStyle(color: _cText)),
+                                    ]),
+                                    style: const TextStyle(
+                                        fontSize: 14, height: 1.4)),
+                              ),
+                          ],
+                        ),
+                      ),
+                  ]),
+            ),
+          ]),
+        ),
+      ),
+    );
   }
 
   // ---------------------------------------------------- UI
@@ -6564,6 +6957,11 @@ class _HomeState extends State<_Home> {
         ),
       Container(width: 1, height: 28, color: _cBorder),
       const SizedBox(width: 6),
+      IconButton(
+        tooltip: 'Ayuda',
+        onPressed: _showHelp,
+        icon: const Icon(Icons.help_outline, size: 22, color: _cText),
+      ),
       TextButton.icon(
         style: TextButton.styleFrom(foregroundColor: _cText),
         onPressed: () => fba.FirebaseAuth.instance.signOut(),
@@ -8900,6 +9298,14 @@ class _DetailState extends State<_Detail> {
           if (dl is List && dl.isNotEmpty) {
             widget.row['chart_off'] =
                 _fmtDate(dl.last.toString()); // columna «Gráfico offline»
+            // La función lo acaba de guardar: se lee una vez para que quede en el dispositivo
+            if (!kIsWeb) {
+              cf.FirebaseFirestore.instance
+                  .collection('screener_charts')
+                  .doc(t.replaceAll('/', '_'))
+                  .get()
+                  .then((_) {}, onError: (_) {});
+            }
           }
         }
         if (body['status'] == 'ok') {
