@@ -51,6 +51,7 @@ const Color _kEma200 = Color(0xFFE5534B); // rojo
 // Líneas del plan en el gráfico (distintas de las EMAs)
 const Color _kLineEntry = Color(0xFF4C8DFF); // azul
 const Color _kLineTarget = Color(0xFF22C3E6); // cian
+const Color _kLinePos = Color(0xFFE8EAED); // mi posición (cartera)
 const Color _kLineStop = Color(0xFFD946EF); // magenta
 
 // Cloud Function que lanza el job en modo intradía (botón "Actualizar ahora").
@@ -154,12 +155,14 @@ class _CandleChart extends CustomPainter {
       {this.entry,
       this.stop,
       this.target,
+      this.pos,
       this.cur = '',
       this.hover,
       this.off = 0});
   final Map<String, dynamic> d;
   final int n; // velas a mostrar
   final double? entry, stop, target;
+  final double? pos; // precio medio de mi posición en cartera
   final String cur;
   final Offset? hover; // posición del cursor / dedo (cruz con valores)
   final int off; // velas ocultas a la derecha (desplazamiento hacia el pasado)
@@ -180,15 +183,19 @@ class _CandleChart extends CustomPainter {
     final start = math.max(0, end - n);
     final cnt = end - start;
     const right = 64.0, bottom = 20.0;
+    // Franja superior reservada al recuadro con los valores de la vela: las velas más
+    // altas no quedan nunca debajo.
+    const top = 48.0;
     final w = size.width - right;
     final volH = (size.height - bottom) * 0.16;
-    final ph = size.height - bottom - volH - 6;
+    final ph = size.height - bottom - volH - 6 - top;
+    if (ph < 40) return;
     var mn = double.infinity, mx = -double.infinity;
     for (var i = start; i < end; i++) {
       if (lo[i] != null) mn = math.min(mn, lo[i]!);
       if (h[i] != null) mx = math.max(mx, h[i]!);
     }
-    for (final x in [entry, stop, target]) {
+    for (final x in [entry, stop, target, pos]) {
       if (x != null && x > 0 && x < mx * 1.25 && x > mn * 0.75) {
         mn = math.min(mn, x);
         mx = math.max(mx, x);
@@ -198,7 +205,7 @@ class _CandleChart extends CustomPainter {
     final pad = (mx - mn) * 0.04;
     mn -= pad;
     mx += pad;
-    double y(double p) => ph - (p - mn) / (mx - mn) * ph;
+    double y(double p) => top + ph - (p - mn) / (mx - mn) * ph;
     final step = w / cnt;
     final grid = Paint()
       ..color = _cDivider
@@ -223,7 +230,7 @@ class _CandleChart extends CustomPainter {
     for (var i = start; i < end; i++) {
       vmax = math.max(vmax, v[i] ?? 0.0);
     }
-    final vTop = ph + 6;
+    final vTop = top + ph + 6;
     for (var i = start; i < end; i++) {
       final x = (i - start) * step;
       final up = (c[i] ?? 0) >= (o[i] ?? 0);
@@ -278,7 +285,7 @@ class _CandleChart extends CustomPainter {
     line('e100', _kEma100);
     line('e200', _kEma200);
     // entrada, stop y objetivo
-    void hline(double? p, Color col, String label) {
+    void hline(double? p, Color col, String label, {Color txt = Colors.white}) {
       if (p == null || p < mn || p > mx) return;
       final yy = y(p);
       final paint = Paint()
@@ -287,8 +294,7 @@ class _CandleChart extends CustomPainter {
       for (var x = 0.0; x < w; x += 8) {
         canvas.drawLine(Offset(x, yy), Offset(math.min(x + 4, w), yy), paint);
       }
-      final t =
-          tp('$label ${_num(p, 2)}', Colors.white, fs: 10, fw: FontWeight.w600);
+      final t = tp('$label ${_num(p, 2)}', txt, fs: 10, fw: FontWeight.w600);
       final r =
           Rect.fromLTWH(w + 2, yy - t.height / 2 - 2, right - 2, t.height + 4);
       canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(3)),
@@ -296,6 +302,7 @@ class _CandleChart extends CustomPainter {
       t.paint(canvas, Offset(w + 4, yy - t.height / 2));
     }
 
+    hline(pos, _kLinePos, 'Pos', txt: Colors.black);
     hline(target, _kLineTarget, 'Obj');
     hline(entry, _kLineEntry, 'Ent');
     hline(stop, _kLineStop, 'Stop');
@@ -320,16 +327,16 @@ class _CandleChart extends CustomPainter {
     final cross = Paint()
       ..color = _cText.withAlpha(140)
       ..strokeWidth = 1;
-    for (var yy = 0.0; yy < size.height - bottom; yy += 6) {
+    for (var yy = top; yy < size.height - bottom; yy += 6) {
       canvas.drawLine(Offset(cx, yy),
           Offset(cx, math.min(yy + 3, size.height - bottom)), cross);
     }
-    if (hv.dy <= ph) {
+    if (hv.dy >= top && hv.dy <= top + ph) {
       for (var xx = 0.0; xx < w; xx += 6) {
         canvas.drawLine(
             Offset(xx, hv.dy), Offset(math.min(xx + 3, w), hv.dy), cross);
       }
-      final pAt = mn + (ph - hv.dy) / ph * (mx - mn);
+      final pAt = mn + (top + ph - hv.dy) / ph * (mx - mn);
       final t = tp(_num(pAt, 2), Colors.black, fs: 10.5, fw: FontWeight.w700);
       final r = Rect.fromLTWH(
           w + 2, hv.dy - t.height / 2 - 2, right - 2, t.height + 4);
@@ -404,6 +411,7 @@ class _CandleChart extends CustomPainter {
       old.entry != entry ||
       old.stop != stop ||
       old.target != target ||
+      old.pos != pos ||
       old.hover != hover ||
       old.off != off;
 }
@@ -411,10 +419,16 @@ class _CandleChart extends CustomPainter {
 /// Gráfico con cruz: ratón (pasar por encima) o dedo (tocar / mantener y arrastrar).
 class _CandleChartView extends StatefulWidget {
   const _CandleChartView(
-      {required this.d, required this.n, this.entry, this.stop, this.target});
+      {required this.d,
+      required this.n,
+      this.entry,
+      this.stop,
+      this.target,
+      this.pos});
   final Map<String, dynamic> d;
-  final int n; // velas visibles iniciales (botones 3M / 6M / 1A)
+  final int n; // velas visibles iniciales (1 año: diarias; 5 años: semanales)
   final double? entry, stop, target;
+  final double? pos; // precio medio de la posición en cartera
 
   @override
   State<_CandleChartView> createState() => _CandleChartViewState();
@@ -437,9 +451,10 @@ class _CandleChartViewState extends State<_CandleChartView> {
   @override
   void didUpdateWidget(covariant _CandleChartView old) {
     super.didUpdateWidget(old);
-    if (old.n != widget.n) {
+    if (old.n != widget.n || !identical(old.d, widget.d)) {
       _n = widget.n;
       _off = 0;
+      _hover = null;
     }
   }
 
@@ -565,6 +580,7 @@ class _CandleChartViewState extends State<_CandleChartView> {
                   entry: widget.entry,
                   stop: widget.stop,
                   target: widget.target,
+                  pos: widget.pos,
                   hover: _ptrs.length >= 2 ? null : _hover,
                   off: _off),
             ),
@@ -2510,6 +2526,8 @@ class _HomeState extends State<_Home> {
   String? _trkErr;
   List<Map<String, dynamic>> _trkRows = [];
   String? _sigSavedKey;
+  final Map<String, double> _trkW =
+      {}; // anchos de columna cambiados en «Detalle por señal»
   List<String> _chartCands =
       []; // candidatos (pasan filtros duros) para guardar su gráfico
   DateTime?
@@ -2898,6 +2916,14 @@ class _HomeState extends State<_Home> {
       }
       _risk = p.getDouble('scr_risk') ?? _risk;
       _maxPos = p.getDouble('scr_maxpos') ?? _maxPos;
+      try {
+        final tw = p.getString('scr_trkw');
+        if (tw != null) {
+          (jsonDecode(tw) as Map).forEach((k, v) {
+            if (v is num) _trkW[k.toString()] = v.toDouble();
+          });
+        }
+      } catch (_) {}
       _riskS = p.getDouble('scr_risk_s') ?? _riskS;
       _maxPosS = p.getDouble('scr_maxpos_s') ?? _maxPosS;
       final hs = p.getString('scr_hard');
@@ -6251,6 +6277,215 @@ class _HomeState extends State<_Home> {
     }
   }
 
+  /// Columnas de «Detalle por señal»: [clave, título, ancho por defecto, alineada a la derecha].
+  List<List<Object>> _trkCols() => [
+        if (_trkDay == 'all') ['day', 'Fecha', 96.0, false],
+        ['t', 'Ticker', 84.0, false],
+        ['name', 'Empresa', 154.0, false],
+        ['score', 'Nota', 58.0, true],
+        ['cls', 'Clasificación', 124.0, false],
+        ['env', 'Entorno', 88.0, false],
+        ['sc_rs', 'RS', 54.0, true],
+        ['sc_ent', 'Entr.', 54.0, true],
+        ['sc_cdl', 'Vela', 54.0, true],
+        ['sc_vol', 'Vol.', 54.0, true],
+        ['sc_rr', 'B/R', 54.0, true],
+        ['gap1', 'Hueco T+1', 86.0, true],
+        ['mv', 'T+$_trkH %', 84.0, true],
+        ['rel', 'vs sector', 84.0, true],
+        ['st', 'Operación', 124.0, false],
+        ['r', 'R neto', 74.0, true],
+        ['factors', 'Factores observados', 380.0, false],
+      ];
+
+  /// Texto de una celda de «Detalle por señal» (también para copiar y enviar).
+  String _trkCell(Map<String, dynamic> r, String k) {
+    String pc(double? v) =>
+        v == null ? '–' : '${v > 0 ? '+' : ''}${_num(v, 2)}';
+    final out = r['out'] as Map?;
+    switch (k) {
+      case 'day':
+        return _fmtDate('${r['day']}');
+      case 'score':
+        return '${r['score'] ?? '–'}';
+      case 'sc_rs':
+      case 'sc_ent':
+      case 'sc_cdl':
+      case 'sc_vol':
+      case 'sc_rr':
+        return _d(r[k]) == null ? '–' : _num(_d(r[k])!, 0);
+      case 'gap1':
+      case 'mv':
+      case 'rel':
+        return pc(_d(r[k]));
+      case 'st':
+        if (out == null) {
+          if (_trkView == 'orig') return 'pendiente';
+          return r['trig1'] == null
+              ? '–'
+              : (r['trig1'] == true ? 'activó T+1' : 'no activó');
+        }
+        return (out['st'] ?? '–').toString();
+      case 'r':
+        final rr = _d(out?['r']);
+        return rr == null
+            ? '–'
+            : '${pc(rr)}${out?['st'] == 'abierta' ? '*' : ''}';
+      default:
+        final v = r[k];
+        return (v == null || '$v'.isEmpty)
+            ? (k == 'factors' || k == 'name' ? '' : '–')
+            : '$v';
+    }
+  }
+
+  /// Seguimiento en texto. Corto (para WhatsApp/correo): contexto, resumen y las señales en
+  /// una línea. Completo (`full`, para pegar en una hoja o enviármelo): además la relación
+  /// entre bloques y resultados, la tabla entera separada por tabuladores y los parámetros.
+  String _trackText({bool full = false}) {
+    final rows = _trkRows;
+    final long = _trkMode == 'long';
+    final orig = _trkView == 'orig';
+    final m = _trkMode;
+    String pc(double? v, {int dec = 2}) =>
+        v == null ? '–' : '${v > 0 ? '+' : ''}${_num(v, dec)}';
+    double? avg(Iterable<double?> xs) {
+      final v = xs.whereType<double>().toList();
+      return v.isEmpty ? null : v.reduce((a, b) => a + b) / v.length;
+    }
+
+    String? st(Map<String, dynamic> r) => (r['out'] as Map?)?['st']?.toString();
+    double? rOf(Map<String, dynamic> r) => _d((r['out'] as Map?)?['r']);
+    const closedSt = ['stop', 'objetivo', 'tiempo'];
+    final done = rows.where((r) => r['fav'] != null).toList();
+    final nFav = done.where((r) => (r['fav'] as double) > 0).length;
+    final days = rows.map((r) => r['day']).toSet().length;
+    final closed = rows.where((r) => closedSt.contains(st(r))).toList();
+    final open = rows.where((r) => st(r) == 'abierta').toList();
+    final b = StringBuffer();
+    b.writeln('SEGUIMIENTO · ${long ? 'Largos' : 'Cortos'} · '
+        '${orig ? 'lo que indicó (original)' : 'simulación con parámetros actuales'} · '
+        '${_trkDay == 'all' ? 'todos los días' : 'señales del ${_fmtDate(_trkDay ?? '')}'} · T+$_trkH');
+    b.writeln('Datos de la app: ${_asofLabel(lower: true)}');
+    b.writeln('');
+    b.writeln('SELECCIÓN (T+$_trkH)');
+    b.writeln(
+        'Señales: ${rows.length} en $days día(s) · con T+$_trkH completo: ${done.length}');
+    if (done.isNotEmpty) {
+      b.writeln(
+          'A favor: $nFav (${_num(nFav / done.length * 100, 0)} %) · movimiento medio a favor '
+          '${pc(avg(done.map((r) => _d(r['fav']))))} % · frente a su sector '
+          '${pc(avg(done.map((r) => _d(r['rel']))))} %');
+    }
+    if (orig) {
+      b.writeln('');
+      b.writeln('OPERACIÓN');
+      b.writeln(
+          'Activaron la entrada: ${closed.length + open.length + rows.where((r) => st(r) == 'ambigua').length} · '
+          'sin operación: ${rows.where((r) => st(r) == 'sin operación').length} · '
+          'cerradas: ${closed.length} (stop ${closed.where((r) => st(r) == 'stop').length}, objetivo '
+          '${closed.where((r) => st(r) == 'objetivo').length}, tiempo '
+          '${closed.where((r) => st(r) == 'tiempo').length})');
+      b.writeln(
+          'R neto medio (cerradas): ${pc(avg(closed.map(rOf)))} · abiertas: ${open.length} '
+          '(R provisional ${pc(avg(open.map(rOf)))}) · ambiguas: '
+          '${rows.where((r) => st(r) == 'ambigua').length} · repetidas: '
+          '${rows.where((r) => st(r) == 'repetida').length}');
+    }
+    String bucket(List<Map<String, dynamic>> g) {
+      final mv = avg(g.map((r) => _d(r['fav'])));
+      final rr = avg(g.where((r) => closedSt.contains(st(r))).map(rOf));
+      return 'n ${g.length}, ${pc(mv)} %${orig ? ', R ${pc(rr)}' : ''}';
+    }
+
+    if (full && done.isNotEmpty) {
+      b.writeln('');
+      b.writeln('POR CLASIFICACIÓN');
+      final byCls = <String, List<Map<String, dynamic>>>{};
+      for (final r in done) {
+        (byCls[(r['cls'] ?? 'Sin nota').toString()] ??= []).add(r);
+      }
+      byCls.forEach((k, g) => b.writeln('$k: ${bucket(g)}'));
+      b.writeln('');
+      b.writeln('RELACIÓN ENTRE BLOQUES Y RESULTADOS (bajo / medio / alto)');
+      final wRs = _spv(m, 'rs63s_w') + _spv(m, 'rs63i_w') + _spv(m, 'rs21s_w');
+      final blocks = <List<Object>>[
+        ['score', 'Nota total (<70 / 70–79 / ≥80)', 100.0],
+        ['sc_rs', 'Fuerza relativa', wRs],
+        ['sc_ent', 'Entrada (EMA20)', _spv(m, 'ent_w')],
+        ['sc_cdl', 'Vela señal', _spv(m, 'cdl_w')],
+        ['sc_vol', 'Volumen', _spv(m, 'vol_w')],
+        ['sc_rr', 'Beneficio/riesgo', _spv(m, 'rr_w')],
+      ];
+      for (final bl in blocks) {
+        final k = bl[0] as String, w = bl[2] as double;
+        double v(Map<String, dynamic> r) => _d(r[k]) ?? 0;
+        double fr(Map<String, dynamic> r) => v(r) / (w <= 0 ? 1 : w);
+        final lo = done
+            .where((r) => k == 'score' ? v(r) < 70 : fr(r) < 1 / 3)
+            .toList();
+        final mid = done
+            .where((r) => k == 'score'
+                ? (v(r) >= 70 && v(r) < 80)
+                : (fr(r) >= 1 / 3 && fr(r) < 2 / 3))
+            .toList();
+        final hi = done
+            .where((r) => k == 'score' ? v(r) >= 80 : fr(r) >= 2 / 3)
+            .toList();
+        b.writeln('${bl[1]}: ${bucket(lo)} | ${bucket(mid)} | ${bucket(hi)}');
+      }
+    }
+    b.writeln('');
+    final cols = _trkCols();
+    if (full) {
+      b.writeln('DETALLE POR SEÑAL');
+      b.writeln(cols.map((c) => c[1]).join('\t'));
+      for (final r in rows) {
+        b.writeln(cols.map((c) => _trkCell(r, c[0] as String)).join('\t'));
+      }
+      b.writeln('');
+      b.writeln('PARÁMETROS ACTUALES (${long ? 'largos' : 'cortos'})');
+      b.writeln(
+          'Filtros duros: ${_kRuleSpecs.where((sp) => (sp.only == null || sp.only == m) && _rule(m, sp.key).on).map((sp) => _ruleText(m, sp)).join('; ')}');
+      b.writeln(
+          'Puntuación: ${_kSpSpecs.map((sp) => '${sp.key}=${_num(_spv(m, sp.key), 2)}').join(', ')}');
+      b.writeln(
+          'Riesgo por operación ${_num(long ? _risk : (_riskS ?? _risk), 0)} \$ · posición máx. '
+          '${_num(long ? _maxPos : (_maxPosS ?? _maxPos), 0)} \$');
+    } else {
+      b.writeln(
+          'SEÑALES (nota · T+$_trkH % · vs sector${orig ? ' · operación' : ''})');
+      for (final r in rows.take(60)) {
+        b.writeln(
+            '${_trkDay == 'all' ? '${_trkCell(r, 'day')} ' : ''}${r['t']}  ${_trkCell(r, 'score')} '
+            '${r['cls'] ?? ''} · ${_trkCell(r, 'mv')} % · ${_trkCell(r, 'rel')}'
+            '${orig ? ' · ${_trkCell(r, 'st')}${_trkCell(r, 'r') == '–' ? '' : ' ${_trkCell(r, 'r')}R'}' : ''}');
+      }
+      if (rows.length > 60)
+        b.writeln(
+            '… y ${rows.length - 60} más (usa «Copiar todo» para la tabla entera).');
+    }
+    return b.toString().trimRight();
+  }
+
+  Future<void> _shareTrack() async {
+    final res = await showDialog<String>(
+      context: context,
+      builder: (_) => _themed(_ShareDialog(
+        title:
+            'Seguimiento ${_trkMode == 'long' ? 'largos' : 'cortos'} · T+$_trkH',
+        heading: 'Enviar seguimiento (${_trkRows.length} señales)',
+        count: _trkRows.length,
+        text: _trackText(),
+        copyText: _trackText(full: true),
+        canClear: false,
+        accent: _accent,
+      )),
+    );
+    if (mounted && res == 'copied')
+      _toast('Seguimiento copiado (tabla completa)');
+  }
+
   Widget _trackView() {
     if (_sigDocs == null && _trkErr == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -6367,83 +6602,107 @@ class _HomeState extends State<_Home> {
 
     final dates = _trkDates();
     final hLabel = 'T+$_trkH';
-    String stLabel(Map<String, dynamic> r) {
-      final o = outOf(r);
-      if (o == null)
-        return orig
-            ? 'pendiente'
-            : (r['trig1'] == null
-                ? '–'
-                : (r['trig1'] == true ? 'activó T+1' : 'no activó'));
-      return (o['st'] ?? '–').toString();
+    // Detalle por señal: columnas con ancho ajustable (arrastrar el borde; doble toque = por defecto)
+    final tcols = _trkCols();
+    double tw(List<Object> c) => _trkW[c[0] as String] ?? (c[2] as double);
+    Widget hcell(List<Object> c) {
+      final k = c[0] as String, right = c[3] as bool, w = tw(c);
+      return SizedBox(
+        width: w,
+        child: Row(children: [
+          Expanded(
+            child: Text(c[1] as String,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: right ? TextAlign.right : TextAlign.left,
+                style: const TextStyle(fontSize: 11.5, color: _cMuted)),
+          ),
+          MouseRegion(
+            cursor: SystemMouseCursors.resizeColumn,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragUpdate: (d) => setState(() =>
+                  _trkW[k] = (w + d.delta.dx).clamp(30.0, 700.0).toDouble()),
+              onHorizontalDragEnd: (_) =>
+                  _prefs?.setString('scr_trkw', jsonEncode(_trkW)),
+              onDoubleTap: () {
+                setState(() => _trkW.remove(k));
+                _prefs?.setString('scr_trkw', jsonEncode(_trkW));
+              },
+              child: SizedBox(
+                width: 14,
+                height: 22,
+                child: Center(
+                    child: Container(width: 1.5, height: 16, color: _cBorder)),
+              ),
+            ),
+          ),
+        ]),
+      );
+    }
+
+    Color? tcolor(Map<String, dynamic> r, String k) {
+      switch (k) {
+        case 'day':
+        case 'name':
+        case 'sc_rs':
+        case 'sc_ent':
+        case 'sc_cdl':
+        case 'sc_vol':
+        case 'sc_rr':
+          return _cMuted;
+        case 'env':
+          return r['env'] == 'favorable'
+              ? _kGreen
+              : (r['env'] == 'adverso' ? _kRed : _cMuted);
+        case 'gap1':
+          return col(
+              _d(r['gap1']) == null ? null : _d(r['gap1'])! * (long ? 1 : -1));
+        case 'mv':
+          return col(_d(r['fav']));
+        case 'rel':
+          return col(_d(r['rel']));
+        case 'st':
+          final st = outOf(r)?['st'];
+          return st == 'stop'
+              ? _kRed
+              : (st == 'objetivo'
+                  ? _kGreen
+                  : (st == 'abierta' ? _kAmber : _cText));
+        case 'r':
+          return col(rOf(r));
+        case 'factors':
+          return _kAmber;
+      }
+      return null;
     }
 
     final table =
         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        if (_trkDay == 'all') head('Fecha', 84, right: false),
-        head('Ticker', 70, right: false),
-        head('Empresa', 140, right: false),
-        head('Nota', 44),
-        const SizedBox(width: 10),
-        head('Clasificación', 110, right: false),
-        head('Entorno', 74, right: false),
-        head('RS', 40),
-        head('Entr.', 40),
-        head('Vela', 40),
-        head('Vol.', 40),
-        head('B/R', 40),
-        head('Hueco T+1', 72),
-        head('$hLabel %', 70),
-        head('vs sector', 70),
-        const SizedBox(width: 12),
-        head('Operación', 110, right: false),
-        head('R neto', 60),
-        const SizedBox(width: 14),
-        head('Factores observados', 360, right: false),
-      ]),
+      Row(children: [for (final c in tcols) hcell(c)]),
       const Divider(height: 10, color: _cDivider),
       for (final r in rows)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 5),
           child: Row(children: [
-            if (_trkDay == 'all')
-              cell(_fmtDate('${r['day']}'), 84, right: false, c: _cMuted),
-            cell('${r['t']}', 70, right: false, fw: FontWeight.w700),
-            cell('${r['name'] ?? ''}', 140, right: false, c: _cMuted),
-            cell('${r['score'] ?? '–'}', 44, fw: FontWeight.w700),
-            const SizedBox(width: 10),
-            cell('${r['cls'] ?? '–'}', 110, right: false),
-            cell('${r['env'] ?? '–'}', 74,
-                right: false,
-                c: r['env'] == 'favorable'
-                    ? _kGreen
-                    : (r['env'] == 'adverso' ? _kRed : _cMuted)),
-            for (final k in ['sc_rs', 'sc_ent', 'sc_cdl', 'sc_vol', 'sc_rr'])
-              cell(_d(r[k]) == null ? '–' : _num(_d(r[k])!, 0), 40, c: _cMuted),
-            cell(pc(_d(r['gap1'])), 72,
-                c: col(_d(r['gap1']) == null
-                    ? null
-                    : _d(r['gap1'])! * (long ? 1 : -1))),
-            cell(pc(_d(r['mv'])), 70,
-                c: col(_d(r['fav'])), fw: FontWeight.w700),
-            cell(pc(_d(r['rel'])), 70, c: col(_d(r['rel']))),
-            const SizedBox(width: 12),
-            cell(stLabel(r), 110,
-                right: false,
-                c: outOf(r)?['st'] == 'stop'
-                    ? _kRed
-                    : (outOf(r)?['st'] == 'objetivo'
-                        ? _kGreen
-                        : (outOf(r)?['st'] == 'abierta' ? _kAmber : _cText))),
-            cell(
-                rOf(r) == null
-                    ? '–'
-                    : '${pc(rOf(r))}${outOf(r)?['st'] == 'abierta' ? '*' : ''}',
-                60,
-                c: col(rOf(r))),
-            const SizedBox(width: 14),
-            cell('${r['factors'] ?? ''}', 360, right: false, c: _kAmber),
+            for (final c in tcols)
+              SizedBox(
+                width: tw(c),
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 14),
+                  child: Text(_trkCell(r, c[0] as String),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign:
+                          (c[3] as bool) ? TextAlign.right : TextAlign.left,
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: tcolor(r, c[0] as String) ?? _cText,
+                          fontWeight: const ['t', 'score', 'mv'].contains(c[0])
+                              ? FontWeight.w700
+                              : FontWeight.w400)),
+                ),
+              ),
           ]),
         ),
     ]);
@@ -6694,11 +6953,38 @@ class _HomeState extends State<_Home> {
                     );
                   }),
                 const SizedBox(height: 20),
-                Text('Detalle por señal',
-                    style: TextStyle(
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.w600,
-                        color: accent)),
+                Row(children: [
+                  Text('Detalle por señal',
+                      style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w600,
+                          color: accent)),
+                  const SizedBox(width: 14),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(foregroundColor: _cText),
+                    icon: const Icon(Icons.send_outlined, size: 18),
+                    label: const Text('Enviar'),
+                    onPressed: _shareTrack,
+                  ),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(foregroundColor: _cText),
+                    icon: const Icon(Icons.copy_outlined, size: 18),
+                    label: const Text('Copiar todo'),
+                    onPressed: () {
+                      Clipboard.setData(
+                          ClipboardData(text: _trackText(full: true)));
+                      _toast(
+                          'Seguimiento copiado (${rows.length} señales, con resumen y parámetros)');
+                    },
+                  ),
+                  const Expanded(
+                    child: Text(
+                        'Arrastra el borde de una cabecera para ensancharla; doble toque la restablece.',
+                        textAlign: TextAlign.right,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11.5, color: _cMuted)),
+                  ),
+                ]),
                 const SizedBox(height: 6),
                 SingleChildScrollView(
                     scrollDirection: Axis.horizontal, child: table),
@@ -6766,6 +7052,12 @@ class _HomeState extends State<_Home> {
           'Columnas / Favoritos',
           '«Columnas» añade, quita y ordena columnas; se pueden ensanchar arrastrando el '
               'borde. La estrella marca favoritos; el icono de gráfico abre el gráfico.'
+        ],
+        [
+          'Gráfico',
+          'Botones «1 año» (velas diarias) y «5 años» (velas semanales); el resto, con zoom '
+              '(pellizco o botones) y desplazamiento. Líneas: medias, entrada, stop, objetivo y, si lo tienes '
+              'en cartera, tu precio medio («Pos»). Las estrellas de favoritos son distintas en Largos y en Cortos.'
         ],
         [
           'Gráficos sin conexión',
@@ -6871,6 +7163,12 @@ class _HomeState extends State<_Home> {
           'Para cada bloque de la nota, compara señales con pocos, medios y muchos '
               'puntos. Si un bloque funciona, «Alto» debería dar mejor resultado que «Bajo» de forma repetida '
               'en muchos días. Con pocas señales, las diferencias pueden ser casualidad.'
+        ],
+        [
+          'Enviar y copiar',
+          'En «Detalle por señal»: «Enviar» abre WhatsApp o correo con el resumen y las '
+              'señales; «Copiar todo» copia resumen, bloques, la tabla entera (pegable en Excel) y tus '
+              'parámetros. Las columnas se ensanchan arrastrando el borde de la cabecera.'
         ],
         [
           'Detalle y factores',
@@ -7723,7 +8021,8 @@ class _HomeState extends State<_Home> {
                       Icon(onlyFav ? Icons.star : Icons.star_border,
                           size: 18, color: _kStar),
                       const SizedBox(width: 6),
-                      Text('Favoritos ($nFav)',
+                      Text(
+                          'Favoritos ${_mode == 'long' ? 'largos' : 'cortos'} ($nFav)',
                           style: TextStyle(
                               color: onlyFav ? _kStar : _cText,
                               fontWeight: FontWeight.w600)),
@@ -9308,11 +9607,19 @@ class _ShareDialog extends StatelessWidget {
     required this.count,
     required this.text,
     required this.accent,
+    this.heading,
+    this.copyText,
+    this.canClear = true,
   });
 
   final String title;
   final int count;
   final String text;
+  final String?
+      heading; // título del diálogo (por defecto, «Enviar favoritos (n)»)
+  final String?
+      copyText; // texto de «Copiar» si es distinto (p. ej. la tabla completa)
+  final bool canClear;
   final Color accent;
 
   Future<void> _open(Uri u) async {
@@ -9333,9 +9640,10 @@ class _ShareDialog extends StatelessWidget {
       ),
       title: Row(
         children: [
-          const Icon(Icons.star, color: _kStar),
+          Icon(heading == null ? Icons.star : Icons.send_outlined,
+              color: _kStar),
           const SizedBox(width: 10),
-          Expanded(child: Text('Enviar favoritos ($count)')),
+          Expanded(child: Text(heading ?? 'Enviar favoritos ($count)')),
           IconButton(
             tooltip: 'Cerrar',
             icon: const Icon(Icons.close, color: _cMuted),
@@ -9360,14 +9668,15 @@ class _ShareDialog extends StatelessWidget {
         ),
       ),
       actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, 'clear'),
-          child: const Text('Vaciar lista', style: TextStyle(color: _kRed)),
-        ),
+        if (canClear)
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'clear'),
+            child: const Text('Vaciar lista', style: TextStyle(color: _kRed)),
+          ),
         TextButton.icon(
           style: TextButton.styleFrom(foregroundColor: _cText),
           onPressed: () {
-            Clipboard.setData(ClipboardData(text: text));
+            Clipboard.setData(ClipboardData(text: copyText ?? text));
             Navigator.pop(context, 'copied');
           },
           icon: const Icon(Icons.copy_outlined, size: 18),
@@ -9484,7 +9793,9 @@ class _DetailState extends State<_Detail> {
   Map<String, dynamic>?
       _chart; // velas guardadas por el job (también sin conexión)
   bool _chartLoading = true;
-  int _chartN = 126; // velas visibles (6 meses)
+  bool _chart5y =
+      false; // false: 1 año (velas diarias); true: 5 años (semanales)
+  Map<String, dynamic>? _chartW; // velas semanales de 5 años
   String? _infoErr;
   bool _infoLoading = true;
 
@@ -9518,6 +9829,9 @@ class _DetailState extends State<_Detail> {
       setState(() {
         _infoLoading = false;
         // Gráfico generado (o actualizado) por la función: queda guardado para usarlo sin conexión
+        if (body['chart_w'] is Map) {
+          _chartW = Map<String, dynamic>.from(body['chart_w'] as Map);
+        }
         if (body['chart'] is Map) {
           _chart = Map<String, dynamic>.from(body['chart'] as Map);
           final dl = _chart!['d'];
@@ -9921,11 +10235,15 @@ class _DetailState extends State<_Detail> {
           .doc(t.replaceAll('/', '_'))
           .get();
       final s = d.data()?['data'];
+      final sw = d.data()?['w'];
       if (!mounted) return;
       setState(() {
         _chart = s is String
             ? Map<String, dynamic>.from(jsonDecode(s) as Map)
             : null;
+        _chartW = sw is String
+            ? Map<String, dynamic>.from(jsonDecode(sw) as Map)
+            : _chartW;
         _chartLoading = false;
       });
     } catch (_) {
@@ -9955,12 +10273,18 @@ class _DetailState extends State<_Detail> {
     final last = ((d['d'] as List?) ?? []).isEmpty
         ? ''
         : (d['d'] as List).last.toString();
-    Widget rng(String l, int n) => Padding(
+    final w5 = _chartW;
+    final weekly = _chart5y && w5 != null;
+    final data = (_chart5y && w5 != null) ? w5 : d;
+    final bars = ((data['c'] as List?) ?? const []).length;
+    Widget rng(String l, bool five) => Padding(
           padding: const EdgeInsets.only(left: 6),
           child: ChoiceChip(
             label: Text(l),
-            selected: _chartN == n,
-            onSelected: (_) => setState(() => _chartN = n),
+            selected: weekly == five,
+            onSelected: (five && w5 == null)
+                ? null
+                : (_) => setState(() => _chart5y = five),
             visualDensity: VisualDensity.compact,
           ),
         );
@@ -9972,6 +10296,9 @@ class _DetailState extends State<_Detail> {
             Text(t, style: const TextStyle(fontSize: 12, color: _cMuted)),
           ]),
         );
+    // Mi posición en cartera (precio medio)
+    final q = _d(widget.row['pf_qty']) ?? 0;
+    final pos = q != 0 ? _d(widget.row['pf_cost']) : null;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(
         padding: const EdgeInsets.only(top: 20, bottom: 8),
@@ -9980,13 +10307,15 @@ class _DetailState extends State<_Detail> {
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
           const SizedBox(width: 10),
           Expanded(
-            child: Text('velas diarias guardadas hasta el ${_fmtDate(last)}',
+            child: Text(
+                weekly
+                    ? 'velas semanales hasta el ${_fmtDate(last)}; medias aproximadas a las diarias'
+                    : 'velas diarias guardadas hasta el ${_fmtDate(last)}',
                 style: const TextStyle(fontSize: 12, color: _cMuted),
                 overflow: TextOverflow.ellipsis),
           ),
-          rng('3M', 63),
-          rng('6M', 126),
-          rng('1A', 260),
+          rng('1 año', false),
+          rng('5 años', true),
         ]),
       ),
       Wrap(children: [
@@ -9997,15 +10326,19 @@ class _DetailState extends State<_Detail> {
         leg(_kLineEntry, 'Entrada'),
         leg(_kLineStop, 'Stop'),
         leg(_kLineTarget, 'Objetivo'),
+        if (pos != null)
+          leg(_kLinePos,
+              'Mi posición (${q < 0 ? 'corto' : 'largo'} ${_num(q.abs(), 0)} acc. a ${_num(pos, 2)})'),
       ]),
       const SizedBox(height: 6),
       SizedBox(
         height: 700,
         child: _CandleChartView(
-            d: d,
-            n: _chartN,
+            d: data,
+            n: math.max(10, bars),
             entry: _parse(_entry.text),
             stop: _parse(_stop.text),
+            pos: pos,
             target: _d(widget.row['p_target']) ??
                 (_long ? _d(widget.row['tgt_l']) : _d(widget.row['tgt_s']))),
       ),
