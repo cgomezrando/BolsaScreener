@@ -1647,6 +1647,11 @@ const List<_RuleSpec> _kRuleSpecs = [
       hasValue: false,
       help:
           'Alguna de las 5 últimas velas ha tocado o cruzado la EMA20: hay retroceso real.'),
+  _RuleSpec('env', 'Excluir entorno adverso', 'Entorno no adverso',
+      hasValue: false,
+      help:
+          'Descarta el valor si al menos 3 de estas 4 referencias van en contra: su índice y su '
+          'sector frente a la EMA50, y la pendiente de la EMA50 de ambos. Es la columna «Entorno».'),
   _RuleSpec('pre', 'Valor en contra hoy, como máximo',
       'Pre-apertura / Hoy no negativo',
       unit: '%',
@@ -1716,6 +1721,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'wick': _Rule(true, 0),
         'hammer': _Rule(false, 0),
         'touch20': _Rule(true, 0),
+        'env': _Rule(false, 0),
         'pre': _Rule(true, 0),
         'vix': _Rule(true, 25),
         'idx_pre': _Rule(true, 0),
@@ -1738,6 +1744,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'wick': _Rule(false, 0),
         'hammer': _Rule(true, 0),
         'touch20': _Rule(true, 0),
+        'env': _Rule(false, 0),
         'pre': _Rule(true, 0),
         'idx_pre': _Rule(true, 0),
         'ind_dir': _Rule(true, 0),
@@ -4357,6 +4364,14 @@ class _HomeState extends State<_Home> {
     }
     if (on('touch20') != null && r['t20_5'] == false)
       return 'sin toque de la EMA20 en 5 velas';
+    if (on('env') != null) {
+      final sgE = long ? 1.0 : -1.0;
+      final bad = [r['idx_a50'], r['idx_s50'], r['sec_a50'], r['sec_s50']]
+          .map(_d)
+          .where((x) => x != null && x * sgE < 0)
+          .length;
+      if (bad >= 3) return 'entorno adverso (índice y sector en contra)';
+    }
     final vixMax = long ? on('vix') : null;
     if (vixMax != null) {
       final v = _d((_regime['us'] as Map?)?['vix']);
@@ -6486,6 +6501,267 @@ class _HomeState extends State<_Home> {
       _toast('Seguimiento copiado (tabla completa)');
   }
 
+  bool _auditBusy = false;
+
+  /// Todo lo necesario para revisar el modelo fuera de la app, en un solo texto: estado de los
+  /// datos, resumen por horizonte, TODAS las señales originales (largos y cortos, todos los
+  /// días, con plan, resultados a T+1/5/10/15 y operación) y los parámetros de ambos modos.
+  /// No depende de lo que esté elegido en pantalla. Números con punto decimal.
+  Future<String> _auditText() async {
+    String n(double? v, [int dec = 2]) =>
+        v == null ? '' : v.toStringAsFixed(dec);
+    final docs = [...(_sigDocs ?? <Map<String, dynamic>>[])]..sort((a, b) {
+        final c = '${b['asof']}'.compareTo('${a['asof']}');
+        return c != 0 ? c : '${a['mode']}'.compareTo('${b['mode']}');
+      });
+    final b = StringBuffer();
+    b.writeln('AUDITORIA SEGUIMIENTO v1');
+    b.writeln('Generado (UTC): ${DateTime.now().toUtc().toIso8601String()}');
+    b.writeln('Datos cargados en la app: $_asof ($_snapMode)');
+    b.writeln('Cierres en el historial: ${(_histDates ?? []).length}');
+    b.writeln('');
+    b.writeln('ESTADO POR LISTA');
+    b.writeln([
+      'fecha',
+      'modo',
+      'senales',
+      'guardada_utc',
+      'reconstruida',
+      'evaluada',
+      'final',
+      'sesiones_posteriores'
+    ].join('\t'));
+    final table = <String>[];
+    // resumen: modo -> horizonte -> [n, a favor, suma movimiento a favor, n rel, suma rel]
+    final sum = <String, Map<int, List<double>>>{};
+    final ops = <String, Map<String, int>>{};
+    final rSum = <String, List<double>>{};
+    const hIdx = {1: 4, 5: 5, 10: 6, 15: 7};
+    for (final doc in docs) {
+      final day = '${doc['asof']}', mode = '${doc['mode']}';
+      final long = mode == 'long';
+      final sg = long ? 1.0 : -1.0;
+      final fwd = await _fwd(day) ?? <String, List?>{};
+      double? f(String? t, int i) {
+        final l = t == null ? null : fwd[t];
+        return (l == null || i >= l.length) ? null : _d(l[i]);
+      }
+
+      final cols =
+          ((doc['cols'] as List?) ?? []).map((e) => e.toString()).toList();
+      List rows = const [];
+      List? outs;
+      try {
+        rows = jsonDecode((doc['rows'] ?? '[]').toString()) as List;
+        outs = doc['out'] is String
+            ? jsonDecode(doc['out'] as String) as List?
+            : null;
+      } catch (_) {}
+      var ses = 0;
+      for (final h in const [1, 5, 10, 15]) {
+        if (f('SPY', hIdx[h]!) != null) ses = h;
+      }
+      b.writeln([
+        day,
+        mode,
+        rows.length,
+        doc['saved'] ?? '',
+        doc['rebuilt'] == true ? 'si' : 'no',
+        outs == null ? 'no' : 'si',
+        doc['final'] == true ? 'si' : 'no',
+        fwd.isEmpty ? 'sin datos' : '>=$ses',
+      ].join('\t'));
+      for (var i = 0; i < rows.length; i++) {
+        final l = rows[i] as List;
+        final r = <String, dynamic>{
+          for (var k = 0; k < cols.length && k < l.length; k++) cols[k]: l[k]
+        };
+        final out = (outs != null && i < outs.length && outs[i] is Map)
+            ? outs[i] as Map
+            : null;
+        final t = r['t']?.toString();
+        final sec = r['sec_etf']?.toString();
+        final idx = r['cur'] == 'EUR' ? r['home_idx']?.toString() : 'SPY';
+        for (final h in const [1, 5, 10, 15]) {
+          final mv = f(t, hIdx[h]!);
+          if (mv == null) continue;
+          final a = (sum[mode] ??= {})[h] ??= [0, 0, 0, 0, 0];
+          a[0] += 1;
+          if (mv * sg > 0) a[1] += 1;
+          a[2] += mv * sg;
+          final sm = f(sec, hIdx[h]!);
+          if (sm != null) {
+            a[3] += 1;
+            a[4] += (mv - sm) * sg;
+          }
+        }
+        final st = out == null ? 'pendiente' : '${out['st'] ?? ''}';
+        (ops[mode] ??= {})[st] = ((ops[mode] ??= {})[st] ?? 0) + 1;
+        final rr = _d(out?['r']);
+        if (rr != null && const ['stop', 'objetivo', 'tiempo'].contains(st)) {
+          final a = rSum[mode] ??= [0, 0];
+          a[0] += 1;
+          a[1] += rr;
+        }
+        table.add([
+          day,
+          mode,
+          t ?? '',
+          '${r['score'] ?? ''}',
+          '${r['cls'] ?? ''}',
+          '${r['env'] ?? ''}',
+          n(_d(r['sc_rs']), 1),
+          n(_d(r['sc_ent']), 1),
+          n(_d(r['sc_cdl']), 1),
+          n(_d(r['sc_vol']), 1),
+          n(_d(r['sc_rr']), 1),
+          n(_d(r['px']), 4),
+          n(_d(r['entry']), 4),
+          n(_d(r['stop']), 4),
+          n(_d(r['target']), 4),
+          n(_d(r['rr'])),
+          '${r['dte'] ?? ''}',
+          '${r['cur'] ?? ''}',
+          sec ?? '',
+          n(f(t, 0), 4),
+          n(f(t, 1)),
+          n(f(t, 2)),
+          n(f(t, 3)),
+          n(f(t, 4)),
+          n(f(t, 5)),
+          n(f(t, 6)),
+          n(f(t, 7)),
+          n(f(sec, 4)),
+          n(f(sec, 5)),
+          n(f(sec, 6)),
+          n(f(sec, 7)),
+          n(f(idx, 4)),
+          n(f(idx, 5)),
+          n(f(idx, 6)),
+          n(f(idx, 7)),
+          st,
+          n(_d(out?['fill']), 4),
+          '${out?['x'] ?? ''}',
+          '${out?['n'] ?? ''}',
+          n(rr, 3),
+          '${r['setup'] ?? ''}',
+        ].join('\t'));
+      }
+    }
+    b.writeln('');
+    b.writeln('RESUMEN (movimiento en el sentido de la senal, %)');
+    for (final mode in const ['long', 'short']) {
+      for (final h in const [1, 5, 10, 15]) {
+        final a = sum[mode]?[h];
+        if (a == null || a[0] == 0) {
+          b.writeln('$mode T+$h: sin datos');
+          continue;
+        }
+        b.writeln(
+            '$mode T+$h: n ${a[0].toInt()} · a favor ${n(a[1] / a[0] * 100, 0)} % · medio '
+            '${n(a[2] / a[0])} · vs sector ${a[3] == 0 ? '' : n(a[4] / a[3])}');
+      }
+      final o = ops[mode] ?? {};
+      b.writeln(
+          '$mode operaciones: ${o.entries.map((e) => '${e.key} ${e.value}').join(' · ')}'
+          '${rSum[mode] == null ? '' : ' · R neto medio cerradas ${n(rSum[mode]![1] / rSum[mode]![0], 3)}'}');
+    }
+    b.writeln('');
+    b.writeln('SENALES (${table.length})');
+    b.writeln([
+      'fecha',
+      'modo',
+      'ticker',
+      'nota',
+      'clasif',
+      'entorno',
+      'pt_rs',
+      'pt_entr',
+      'pt_vela',
+      'pt_vol',
+      'pt_br',
+      'precio',
+      'entrada',
+      'stop',
+      'objetivo',
+      'br',
+      'dias_result',
+      'div',
+      'sector',
+      'c0',
+      'ap1',
+      'max1',
+      'min1',
+      't1',
+      't5',
+      't10',
+      't15',
+      'sec1',
+      'sec5',
+      'sec10',
+      'sec15',
+      'idx1',
+      'idx5',
+      'idx10',
+      'idx15',
+      'operacion',
+      'ejec',
+      'salida',
+      'sesiones',
+      'r_neto',
+      'estado',
+    ].join('\t'));
+    for (final l in table) {
+      b.writeln(l);
+    }
+    for (final m in const ['long', 'short']) {
+      b.writeln('');
+      b.writeln('PARAMETROS ACTUALES ($m)');
+      b.writeln(
+          'Filtros duros: ${_kRuleSpecs.where((sp) => (sp.only == null || sp.only == m) && _rule(m, sp.key).on).map((sp) => _ruleText(m, sp)).join('; ')}');
+      b.writeln(
+          'Puntuacion: ${_kSpSpecs.map((sp) => '${sp.key}=${_spv(m, sp.key)}').join(', ')}');
+      b.writeln(
+          'Riesgo ${n(m == 'long' ? _risk : (_riskS ?? _risk), 0)} · posicion max. '
+          '${n(m == 'long' ? _maxPos : (_maxPosS ?? _maxPos), 0)}');
+    }
+    // Parámetros con los que se guardó cada lista, si no son los de ahora
+    final cur = jsonEncode({'hard': _rulesToJson(), 'score': _scoreToJson()});
+    final other = <String, List<String>>{};
+    for (final doc in docs) {
+      final p = '${doc['params'] ?? ''}';
+      if (p.isNotEmpty && p != cur)
+        (other[p] ??= []).add('${doc['asof']}_${doc['mode']}');
+    }
+    if (other.isNotEmpty) {
+      b.writeln('');
+      b.writeln('PARAMETROS DISTINTOS DE LOS ACTUALES');
+      other.forEach((p, ds) {
+        b.writeln('Listas: ${ds.join(', ')}');
+        b.writeln(p);
+      });
+    }
+    return b.toString().trimRight();
+  }
+
+  Future<void> _copyAudit() async {
+    if (_auditBusy) return;
+    setState(() => _auditBusy = true);
+    try {
+      if (_sigDocs == null) await _loadTrackIndex();
+      final txt = await _auditText();
+      await Clipboard.setData(ClipboardData(text: txt));
+      final nSig =
+          RegExp(r'SENALES \((\d+)\)').firstMatch(txt)?.group(1) ?? '0';
+      _toast(
+          'Auditoría copiada: $nSig señales de largos y cortos, todos los días');
+    } catch (e) {
+      _toast('No se pudo preparar la auditoría: $e');
+    } finally {
+      if (mounted) setState(() => _auditBusy = false);
+    }
+  }
+
   Widget _trackView() {
     if (_sigDocs == null && _trkErr == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -6783,6 +7059,18 @@ class _HomeState extends State<_Home> {
                     width: 18,
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2)),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                    backgroundColor: _accent, foregroundColor: Colors.black),
+                onPressed: _auditBusy ? null : _copyAudit,
+                icon: _auditBusy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.fact_check_outlined, size: 18),
+                label: const Text('Copiar auditoría'),
+              ),
               TextButton.icon(
                 style: TextButton.styleFrom(foregroundColor: _accent),
                 onPressed: _showHelp,
@@ -7169,6 +7457,13 @@ class _HomeState extends State<_Home> {
           'En «Detalle por señal»: «Enviar» abre WhatsApp o correo con el resumen y las '
               'señales; «Copiar todo» copia resumen, bloques, la tabla entera (pegable en Excel) y tus '
               'parámetros. Las columnas se ensanchan arrastrando el borde de la cabecera.'
+        ],
+        [
+          'Copiar auditoría',
+          'El botón de arriba copia de una vez todo lo necesario para revisar el modelo: '
+              'largos y cortos, todos los días, con entrada, stop, objetivo, resultados a T+1, T+5, T+10 y '
+              'T+15, la operación y los parámetros. No depende de lo que tengas elegido en pantalla. Pégalo '
+              'tal cual en el chat.'
         ],
         [
           'Detalle y factores',
