@@ -1000,6 +1000,19 @@ List<_Field> _buildFields() {
       _cPlan,
       w: 110,
       h: 'Pre-apertura plan');
+  ch(
+      'ent_state',
+      'Entrada en la sesión (en espera / activada / superada / invalidada; solo con la sesión abierta)',
+      _cPlan,
+      w: 100,
+      h: 'Entrada hoy');
+  n(
+      'ent_past',
+      'Cuánto ha pasado el precio de la entrada, en ATR (negativo = aún no la alcanza)',
+      _cPlan,
+      dec: 2,
+      w: 84,
+      h: 'Sobre la entrada (ATR)');
   n(
       'score_pre',
       'Puntuación pre-apertura (con la entrada al precio del pre-market)',
@@ -1208,6 +1221,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'pre_state',
     'score_pre',
     'p_entry',
+    'ent_state',
     'p_stop_pct',
     'p_stop_atr',
     'p_target_pct',
@@ -1235,6 +1249,7 @@ const Map<String, List<String>> _kDefaultCols = {
     'pre_state',
     'score_pre',
     'p_entry',
+    'ent_state',
     'p_stop_pct',
     'p_stop_atr',
     'p_target_pct',
@@ -1256,6 +1271,11 @@ const Map<String, List<String>> _kDefaultCols = {
 };
 
 const Map<String, String> _kHelp = {
+  'ent_state':
+      'Solo con la sesión abierta y datos de hoy. Compara el precio actual con la entrada del plan '
+          '(máximo o mínimo de la vela CERRADA de ayer, no la de hoy): en espera = aún no la alcanza; activada = '
+          'ya la ha pasado hasta 0,5 ATR; superada = más de 0,5 ATR (entrar ahora da un B/R peor); invalidada = '
+          'ha pasado el stop.',
   'pre_state':
       'Con el precio del pre-market (largos; cortos al revés): en espera = entre el stop y la '
           'entrada; abre activada = por encima de la entrada hasta 0,5 ATR; hueco excesivo = más de 0,5 ATR; '
@@ -1652,6 +1672,14 @@ const List<_RuleSpec> _kRuleSpecs = [
       help:
           'Descarta el valor si al menos 3 de estas 4 referencias van en contra: su índice y su '
           'sector frente a la EMA50, y la pendiente de la EMA50 de ambos. Es la columna «Entorno».'),
+  _RuleSpec('ent_over', 'Entrada superada, como máximo',
+      'Entrada no superada (≤ {v} ATR)',
+      unit: 'ATR',
+      dec: 1,
+      help:
+          'Solo con la sesión abierta y datos de hoy. Descarta el valor si el precio ya ha pasado la '
+          'entrada del plan (máximo o mínimo de la vela cerrada de ayer) en más de estos ATR, o si ya ha '
+          'pasado el stop.'),
   _RuleSpec('pre', 'Valor en contra hoy, como máximo',
       'Pre-apertura / Hoy no negativo',
       unit: '%',
@@ -1722,6 +1750,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'hammer': _Rule(false, 0),
         'touch20': _Rule(true, 0),
         'env': _Rule(false, 0),
+        'ent_over': _Rule(false, 0.5),
         'pre': _Rule(true, 0),
         'vix': _Rule(true, 25),
         'idx_pre': _Rule(true, 0),
@@ -1745,6 +1774,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'hammer': _Rule(true, 0),
         'touch20': _Rule(true, 0),
         'env': _Rule(false, 0),
+        'ent_over': _Rule(false, 0.5),
         'pre': _Rule(true, 0),
         'idx_pre': _Rule(true, 0),
         'ind_dir': _Rule(true, 0),
@@ -2207,6 +2237,11 @@ Color? _colorFor(_Field f, dynamic v) {
   }
   if (f.key == 'figure')
     return v.toString().startsWith('doble suelo') ? _kGreen : _kRed;
+  if (f.key == 'ent_state') {
+    if (v == 'activada') return _kGreen;
+    if (v == 'superada') return _kAmber;
+    if (v == 'invalidada') return _kRed;
+  }
   if (f.key == 'pre_state') {
     if (v == 'abre activada') return _kGreen;
     if (v == 'hueco excesivo') return _kAmber;
@@ -2656,6 +2691,7 @@ class _HomeState extends State<_Home> {
     _ensurePfChg();
     _ensurePre();
     _ensurePreScore();
+    _ensureEntState();
     _ensure1w();
     _save();
     _riskCtl.text = _plain(_riskM);
@@ -4171,12 +4207,21 @@ class _HomeState extends State<_Home> {
         'p_risk',
         'p_risk_pct',
         'p_target_cap',
-        'borrow_x'
+        'borrow_x',
+        'ent_state',
+        'ent_past'
       ]) {
         r[k] = null;
       }
-      final hi = _d(r['day_high']);
-      final lo = _d(r['day_low']);
+      // Con la sesión de hoy abierta y la vela de hoy ya en los datos, el plan sigue siendo el de la
+      // vela cerrada de ayer (la orden se coloca con ella); si no hay esa vela, se usa la última.
+      final isEuP = r['currency'] == 'EUR';
+      final inSession =
+          _sessionOpen(isEuP) && r['last_date']?.toString() == _todayIso();
+      final pHi = _d(r['prev_high']), pLo = _d(r['prev_low']);
+      final useP = inSession && pHi != null && pLo != null;
+      final hi = useP ? pHi : _d(r['day_high']);
+      final lo = useP ? pLo : _d(r['day_low']);
       final px = _d(r['price']);
       final atrp = _d(r['atr_pct']);
       if (hi == null || lo == null || px == null) continue;
@@ -4212,6 +4257,16 @@ class _HomeState extends State<_Home> {
       final risk = _riskM / fx;
       final maxPos = _maxPosM / fx;
       final shares = (math.min(risk / dist, maxPos / entry) / 5).floor() * 5;
+      if (useP && atrAbs != null && atrAbs > 0) {
+        final past = (long ? px - entry : entry - px) / atrAbs;
+        final beyond = long ? px <= stop : px >= stop;
+        r['ent_past'] = past;
+        r['ent_state'] = beyond
+            ? 'invalidada'
+            : (past < 0
+                ? 'en espera'
+                : (past <= 0.5 ? 'activada' : 'superada'));
+      }
       r['p_entry'] = entry;
       r['p_stop'] = stop;
       r['p_stop_pct'] = dist / entry * 100;
@@ -4371,6 +4426,14 @@ class _HomeState extends State<_Home> {
           .where((x) => x != null && x * sgE < 0)
           .length;
       if (bad >= 3) return 'entorno adverso (índice y sector en contra)';
+    }
+    final entOver = on('ent_over');
+    if (entOver != null) {
+      if (r['ent_state'] == 'invalidada') return 'precio ya más allá del stop';
+      final past = g('ent_past');
+      if (past != null && past > entOver) {
+        return 'entrada superada en ${_num(past, 1)} ATR (> ${n0(entOver, 1)})';
+      }
     }
     final vixMax = long ? on('vix') : null;
     if (vixMax != null) {
@@ -4973,6 +5036,18 @@ class _HomeState extends State<_Home> {
       }
     }
     p.setBool('scr_prescore_v1', true);
+  }
+
+  /// Añade una vez «Entrada hoy» tras «Entrada» en Largos y Cortos.
+  void _ensureEntState() {
+    final p = _prefs;
+    if (p == null || (p.getBool('scr_entst_v1') ?? false)) return;
+    for (final l in [_cols['long']!, _cols['short']!]) {
+      if (l.contains('ent_state')) continue;
+      final i = l.indexOf('p_entry');
+      if (i >= 0) l.insert(i + 1, 'ent_state');
+    }
+    p.setBool('scr_entst_v1', true);
   }
 
   void _ensurePfChg() {
@@ -7691,7 +7766,7 @@ class _HomeState extends State<_Home> {
       onTap: () => setState(() => _tab = i),
       child: Container(
         height: 64,
-        padding: const EdgeInsets.symmetric(horizontal: 18),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
         alignment: Alignment.center,
         decoration: BoxDecoration(
           border: Border(
@@ -7709,30 +7784,37 @@ class _HomeState extends State<_Home> {
   }
 
   Widget _topBar(bool wide) {
-    final right = <Widget>[
-      if (_jobRunning)
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2, color: _kGreen)),
-          const SizedBox(width: 8),
-          Text('Actualizando… ${_elapsed()}',
-              style: const TextStyle(fontSize: 14, color: _kGreen)),
-        ])
-      else if (_asof.isNotEmpty)
-        Text.rich(TextSpan(children: [
-          TextSpan(
-              text: _asofLabel(),
-              style: TextStyle(
-                  fontSize: 14, color: _isIntraday ? _kAmber : _cMuted)),
-          // Tras «Actualizar precios»: hora de los precios de la sesión
-          if (_lastPrices != null)
-            TextSpan(
-                text: '  ·  precios del ${_fmtDT(_lastPrices!)}',
-                style: const TextStyle(fontSize: 14, color: _kEdit)),
-        ])),
-      const SizedBox(width: 8),
+    // Estado de los datos: a la izquierda de los iconos, en dos líneas si hace falta
+    final Widget status = _jobRunning
+        ? Row(mainAxisSize: MainAxisSize.min, children: [
+            const SizedBox(
+                width: 14,
+                height: 14,
+                child:
+                    CircularProgressIndicator(strokeWidth: 2, color: _kGreen)),
+            const SizedBox(width: 8),
+            Text('Actualizando… ${_elapsed()}',
+                style: const TextStyle(fontSize: 13, color: _kGreen)),
+          ])
+        : (_asof.isNotEmpty
+            ? Text.rich(
+                TextSpan(children: [
+                  TextSpan(
+                      text: _asofLabel(),
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: _isIntraday ? _kAmber : _cMuted)),
+                  // Tras «Actualizar precios»: hora de los precios de la sesión
+                  if (_lastPrices != null)
+                    TextSpan(
+                        text: '\nprecios del ${_fmtDT(_lastPrices!)}',
+                        style: const TextStyle(fontSize: 13, color: _kEdit)),
+                ]),
+                maxLines: 2,
+                textAlign: TextAlign.right,
+                overflow: TextOverflow.ellipsis)
+            : const SizedBox.shrink());
+    final actions = <Widget>[
       IconButton(
         tooltip:
             'Descargar datos ahora (unos minutos; vela de hoy provisional)',
@@ -7772,18 +7854,17 @@ class _HomeState extends State<_Home> {
         onPressed: _showHelp,
         icon: const Icon(Icons.help_outline, size: 22, color: _cText),
       ),
-      TextButton.icon(
-        style: TextButton.styleFrom(foregroundColor: _cText),
+      IconButton(
+        tooltip: 'Salir',
         onPressed: () => fba.FirebaseAuth.instance.signOut(),
-        icon: const Icon(Icons.logout, size: 18),
-        label: const Text('Salir'),
+        icon: const Icon(Icons.logout, size: 20, color: _cText),
       ),
     ];
     final left = <Widget>[
       // Largos/Cortos solo tienen efecto en el Screener
       if (_tab == 0) ...[
         _modeToggle(),
-        const SizedBox(width: 28),
+        const SizedBox(width: 16),
       ],
       _tabBtn(0, 'Screener'),
       _tabBtn(1, 'Sectores e índices'),
@@ -7795,7 +7876,20 @@ class _HomeState extends State<_Home> {
       return Container(
         height: 64,
         padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Row(children: [...left, const Spacer(), ...right]),
+        // Los iconos y el estado siempre se ven; si no caben, se desplaza el lado izquierdo
+        child: Row(children: [
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(children: left),
+            ),
+          ),
+          const SizedBox(width: 10),
+          ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 190), child: status),
+          const SizedBox(width: 4),
+          ...actions,
+        ]),
       );
     }
     return Padding(
@@ -7803,7 +7897,7 @@ class _HomeState extends State<_Home> {
       child: Wrap(
         crossAxisAlignment: WrapCrossAlignment.center,
         spacing: 4,
-        children: [...left, ...right],
+        children: [...left, status, ...actions],
       ),
     );
   }
@@ -8256,19 +8350,26 @@ class _HomeState extends State<_Home> {
           padding: const EdgeInsets.fromLTRB(20, 14, 12, 10),
           child: Row(
             children: [
-              Text('${vis.length} empresas',
-                  style: const TextStyle(
-                      fontSize: 22, fontWeight: FontWeight.w600)),
-              const SizedBox(width: 16),
               Expanded(
-                child: Text(
-                  '${onlyFav ? 'Solo favoritos (los filtros no se aplican)' : 'Orden: ${_kFieldMap[sk]?.label ?? sk} '
-                      '${_sortAsc[_mode]! ? '↑' : '↓'}'}'
-                  '${_liveAt != null ? ' · precios de las ${_two(_liveAt!.hour)}:${_two(_liveAt!.minute)} ($_liveCount valores)' : ''}',
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13.5, color: _cMuted),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('${vis.length} empresas',
+                        style: const TextStyle(
+                            fontSize: 22, fontWeight: FontWeight.w600)),
+                    Text(
+                      '${onlyFav ? 'Solo favoritos (los filtros no se aplican)' : 'Orden: ${_kFieldMap[sk]?.label ?? sk} '
+                          '${_sortAsc[_mode]! ? '↑' : '↓'}'}'
+                      '${_liveAt != null ? ' · precios de las ${_two(_liveAt!.hour)}:${_two(_liveAt!.minute)} ($_liveCount valores)' : ''}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 13, color: _cMuted),
+                    ),
+                  ],
                 ),
               ),
+              const SizedBox(width: 12),
               Tooltip(
                 message:
                     'Actualiza precios y técnico de los valores en pantalla en Largos '
