@@ -4644,26 +4644,10 @@ class _HomeState extends State<_Home> {
     final ok = _rows.where((r) => r['swing_ok'] == true).length;
     // Motivos de descarte más frecuentes (el primer filtro que falla en cada valor)
     final why = <String, int>{};
-    final numRe = RegExp(r'\(?[+\-−]?\d+([.,]\d+)?\)?');
     for (final r in _rows) {
       final d = r['discard']?.toString();
       if (d == null || d.isEmpty || r['swing_ok'] == true) continue;
-      // Se agrupa sin las cifras de cada valor, pero conservando «EMA20», «EMA50 bajo la EMA200»
-      // y «5 velas» (los dígitos protegidos se guardan como caracteres privados y se restauran)
-      final prot = d.replaceAllMapped(
-          RegExp(r'EMA\d+|\d+ velas'),
-          (m) => m[0]!.split('').map((ch) {
-                final i = '0123456789'.indexOf(ch);
-                return i < 0 ? ch : String.fromCharCode(0xE000 + i);
-              }).join());
-      final k = prot
-          .replaceAll(numRe, '')
-          .replaceAll(RegExp(r'\s*\([<>≤≥]?[^()]*\)?\s*$'), '')
-          .replaceAll(RegExp(r'\s+'), ' ')
-          .replaceAll(' %', '')
-          .replaceAllMapped(RegExp('[\uE000-\uE009]'),
-              (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xE000 + 48))
-          .trim();
+      final k = _discardGroup(d);
       why[k] = (why[k] ?? 0) + 1;
     }
     final top = why.entries.toList()
@@ -10271,6 +10255,50 @@ class _TextAskState extends State<_TextAsk> {
 }
 
 // ----------------------------------------------------------------- ficha de empresa
+
+/// Motivo de descarte sin la cifra de cada valor, para agruparlos: «capitalización 1.500 M$
+/// (< 2.000 M$)» pasa a «capitalización menor de 2.000 M$». Conserva el umbral del filtro.
+String _discardGroup(String d) {
+  final m = RegExp(r'\(([<>≤≥])\s*([^)]*)\)\s*$').firstMatch(d);
+  final thr = (m?[2] ?? '').trim();
+  final less = m?[1] == '<' || m?[1] == '≤';
+  final cmp = less ? 'menor de' : 'mayor de';
+  if (d.startsWith('precio fijado')) return d;
+  if (d.startsWith('precio ya')) return d;
+  if (d.startsWith('precio ')) return 'precio $cmp $thr';
+  if (d.startsWith('capitalización')) return 'capitalización $cmp $thr';
+  if (d.startsWith('a ') && d.contains('de la EMA20'))
+    return 'a más de $thr de la EMA20';
+  if (d.startsWith('RSI ')) return 'RSI $cmp $thr';
+  if (d.startsWith('última vela sin'))
+    return d.replaceAll(RegExp(r'\s*\([^)]*\)\s*$'), '');
+  if (d.startsWith('última vela: mecha')) {
+    return d.replaceAll(RegExp(r'\s*\d+([.,]\d+)?\s*%'), '');
+  }
+  if (d.startsWith('entrada superada'))
+    return 'entrada superada en más de $thr ATR';
+  if (d.startsWith('VIX ')) return 'VIX $cmp $thr';
+  if (d.startsWith('S&P en pre-apertura'))
+    return 'S&P en pre-apertura en contra';
+  if (d.startsWith('industria')) {
+    return d.contains('pre-apertura')
+        ? 'industria en contra en pre-apertura'
+        : 'industria en contra hoy';
+  }
+  if (d.startsWith('hoy ')) return 'valor en contra hoy';
+  if (d.startsWith('pre-apertura ')) return 'valor en contra en pre-apertura';
+  if (d.startsWith('resultados en')) return 'resultados en $thr días o menos';
+  if (d.startsWith('ex-dividendo en'))
+    return 'ex-dividendo en $thr días o menos';
+  if (d.startsWith('stop a')) return 'stop a menos de $thr ATR';
+  if (d.startsWith('B/R ')) return 'B/R $cmp $thr';
+  if (d.startsWith('préstamo disponible'))
+    return 'préstamo disponible $cmp $thr tu posición';
+  if (d.startsWith('tasa de préstamo')) return 'tasa de préstamo $cmp $thr';
+  if (d.startsWith('volumen ')) return 'volumen $cmp $thr M\$/día';
+  if (d.startsWith('riesgo usado')) return 'riesgo usado $cmp $thr %';
+  return d; // EMAs, toque de la EMA20, entorno, sin datos…
+}
 
 // ----------------------------------------------------------------- gráfico de 5 años (velas diarias)
 
