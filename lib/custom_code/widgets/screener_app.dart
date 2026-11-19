@@ -426,7 +426,7 @@ class _CandleChartView extends StatefulWidget {
       this.target,
       this.pos});
   final Map<String, dynamic> d;
-  final int n; // velas visibles iniciales (1 año: diarias; 5 años: semanales)
+  final int n; // velas visibles iniciales
   final double? entry, stop, target;
   final double? pos; // precio medio de la posición en cartera
 
@@ -2537,6 +2537,8 @@ class _Home extends StatefulWidget {
 
 class _HomeState extends State<_Home> {
   SharedPreferences? _prefs;
+  bool _plane =
+      false; // modo avión: los gráficos se abren con los datos guardados (sin conexión)
   bool _loading = true;
   String? _error;
 
@@ -2685,6 +2687,7 @@ class _HomeState extends State<_Home> {
   Future<void> _init() async {
     try {
       _prefs = await SharedPreferences.getInstance();
+      _plane = _prefs?.getBool('scr_plane') ?? false;
       _restore();
     } catch (_) {}
     await _pullSettings();
@@ -3280,8 +3283,10 @@ class _HomeState extends State<_Home> {
               final c =
                   await ref.get(const cf.GetOptions(source: cf.Source.cache));
               final raw = c.data()?['data'];
-              if (raw is String && raw.contains('"$want"'))
-                return; // ya está al día
+              // ya está al día (y con las velas de 5 años)
+              if (raw is String &&
+                  raw.contains('"$want"') &&
+                  c.data()?['d5'] is String) return;
             } catch (_) {}
           }
           final d =
@@ -3339,12 +3344,80 @@ class _HomeState extends State<_Home> {
     } catch (_) {}
   }
 
-  /// «Descargar todo» (para viajar sin conexión): los gráficos de TODOS los valores.
-  Future<void> _downloadAll() async {
+  /// Modo avión: el icono de gráfico abre el gráfico guardado en una ventana grande. Al
+  /// activarlo con conexión (app del iPad) se completa además la descarga de todo.
+  void _togglePlane() {
+    setState(() => _plane = !_plane);
+    _prefs?.setBool('scr_plane', _plane);
+    _toast(_plane
+        ? 'Modo avión activado: los gráficos se abren con los datos guardados'
+        : 'Modo avión desactivado: los gráficos se abren en TradingView');
+    if (_plane && !kIsWeb && !_dlBusy && !_jobRunning)
+      _downloadAll(reload: false, quiet: true);
+  }
+
+  /// Gráfico de un valor o índice: en modo avión, el guardado (ventana grande); si no, TradingView.
+  void _chartTap(String sym,
+      {String? title, Map<String, dynamic>? row, String? tv}) {
+    if (sym.isEmpty) return;
+    if (!_plane) {
+      _openTradingView(tv ?? sym);
+      return;
+    }
+    final q = _d(row?['pf_qty']) ?? 0;
+    showDialog<void>(
+      context: context,
+      builder: (_) => _themed(_ChartDialog(
+        symbol: sym,
+        title: title ?? sym,
+        entry: _d(row?['p_entry']),
+        stop: _d(row?['p_stop']),
+        target: _d(row?['p_target']),
+        pos: q != 0 ? _d(row?['pf_cost']) : null,
+        posQty: q,
+      )),
+    );
+  }
+
+  /// Tras la nube: espera a que el job termine de guardar los gráficos (los guarda después de
+  /// los datos) y lo deja todo en el dispositivo, como hacía el botón del avión.
+  Future<void> _afterNube(String latestIso) async {
+    if (kIsWeb || _dlBusy) return;
+    final t0 = DateTime.tryParse(latestIso);
+    setState(() {
+      _dlBusy = true;
+      _dlWhat = 'Esperando gráficos';
+      _dlDone = 0;
+      _dlTotal = 0;
+    });
+    try {
+      final ref = cf.FirebaseFirestore.instance
+          .collection('screener_meta')
+          .doc('charts');
+      for (var i = 0; i < 60 && mounted; i++) {
+        try {
+          final d =
+              await ref.get(const cf.GetOptions(source: cf.Source.server));
+          final u =
+              DateTime.tryParse((d.data()?['updated_iso'] ?? '').toString());
+          if (t0 == null || (u != null && !u.isBefore(t0))) break;
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(seconds: 10));
+      }
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _dlBusy = false);
+    await _downloadAll(reload: false);
+  }
+
+  /// Descarga todo para verlo sin conexión: gráficos de TODOS los valores e índices, fichas de
+  /// cartera y favoritos y Seguimiento. Lo lanza la nube al terminar y el modo avión al activarse.
+  Future<void> _downloadAll({bool reload = true, bool quiet = false}) async {
     if (_dlBusy) return;
     if (kIsWeb) {
-      _toast(
-          'La descarga para ver sin conexión solo funciona en la app del iPad.');
+      if (!quiet)
+        _toast(
+            'La descarga para ver sin conexión solo funciona en la app del iPad.');
       return;
     }
     setState(() {
@@ -3355,7 +3428,7 @@ class _HomeState extends State<_Home> {
     try {
       // Primero los datos más recientes guardados (lo mismo que «Datos nuevos · Cargar»)
       if (mounted) setState(() => _dlWhat = 'Datos');
-      await _load();
+      if (reload) await _load();
       final all = await _loadChartMeta();
       if (mounted) {
         setState(() {
@@ -3389,12 +3462,15 @@ class _HomeState extends State<_Home> {
         await _downloadTracking();
       } catch (_) {}
       final ok = all.length - res[1];
-      _toast(res[1] == 0
-          ? 'Listo para ver sin conexión: ${all.length} gráficos (${res[0]} descargados ahora), '
-              '$fichas fichas de cartera y favoritos y el Seguimiento. ${_asofLabel()}.'
-          : 'Gráficos: $ok de ${all.length}; ${res[1]} han fallado. Revisa la conexión y repite.');
+      // Al activar el modo avión sin conexión no se avisa de los que no se han podido bajar
+      if (!quiet || res[1] == 0) {
+        _toast(res[1] == 0
+            ? 'Listo para ver sin conexión: ${all.length} gráficos (${res[0]} descargados ahora), '
+                '$fichas fichas de cartera y favoritos y el Seguimiento. ${_asofLabel()}.'
+            : 'Gráficos: $ok de ${all.length}; ${res[1]} han fallado. Revisa la conexión y repite.');
+      }
     } catch (e) {
-      _toast('No se pudo descargar: $e');
+      if (!quiet) _toast('No se pudo descargar: $e');
     }
     if (mounted) setState(() => _dlBusy = false);
   }
@@ -3587,7 +3663,7 @@ class _HomeState extends State<_Home> {
     out.addAll(_industries.keys);
     for (final m in _macro) {
       final sym = m['sym'];
-      if (sym is String) out.add(sym);
+      if (sym is String && m['src'] != 'rate') out.add(sym);
     }
     for (final f in _kMacroFut) {
       out.add(f['sym']!);
@@ -3916,14 +3992,16 @@ class _HomeState extends State<_Home> {
         text: base.text,
         leading: base.leading,
         trailing: (r) => Tooltip(
-          message: 'Ver en TradingView',
+          message:
+              _plane ? 'Gráfico guardado (modo avión)' : 'Ver en TradingView',
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => _openTradingView((r['ticker'] ?? '').toString()),
-            child: const Padding(
-              padding: EdgeInsets.only(left: 4),
+            onTap: () => _chartTap((r['ticker'] ?? '').toString(),
+                title: '${r['ticker'] ?? ''} · ${r['name'] ?? ''}', row: r),
+            child: Padding(
+              padding: const EdgeInsets.only(left: 4),
               child: Icon(Icons.candlestick_chart_outlined,
-                  size: 17, color: _cMuted),
+                  size: 17, color: _plane ? _kGreen : _cMuted),
             ),
           ),
         ),
@@ -4071,12 +4149,12 @@ class _HomeState extends State<_Home> {
     return a.isAfter(b) ? a : b;
   }
 
-  /// "Cierre del 27-10-2026" o "Intradía 28-10 16:45 (provisional)".
+  /// "Cierre del 27 octubre" o "Intradía 28 octubre 16:45".
   String _asofLabel({bool lower = false}) {
     if (_isIntraday) {
       final t = DateTime.tryParse(_updatedIso)?.toLocal();
       final hm = t == null ? '' : ' ${_fmtDT(t)}';
-      return '${lower ? 'intradía' : 'Intradía'}$hm (provisional)';
+      return '${lower ? 'intradía' : 'Intradía'}$hm';
     }
     return '${lower ? 'cierre del' : 'Cierre del'} ${_fmtDate(_asof)}';
   }
@@ -4163,7 +4241,9 @@ class _HomeState extends State<_Home> {
       if (u != null && u.isNotEmpty && u != _jobBaseline) {
         _stopJob();
         await _load();
-        _toast('Datos actualizados (${_asofLabel(lower: true)})');
+        _toast('Datos actualizados (${_asofLabel(lower: true)})'
+            '${kIsWeb ? '' : '. Descargando gráficos para verlos sin conexión…'}');
+        _afterNube(u);
       }
     });
   }
@@ -4568,10 +4648,21 @@ class _HomeState extends State<_Home> {
     for (final r in _rows) {
       final d = r['discard']?.toString();
       if (d == null || d.isEmpty || r['swing_ok'] == true) continue;
-      final k = d
+      // Se agrupa sin las cifras de cada valor, pero conservando «EMA20», «EMA50 bajo la EMA200»
+      // y «5 velas» (los dígitos protegidos se guardan como caracteres privados y se restauran)
+      final prot = d.replaceAllMapped(
+          RegExp(r'EMA\d+|\d+ velas'),
+          (m) => m[0]!.split('').map((ch) {
+                final i = '0123456789'.indexOf(ch);
+                return i < 0 ? ch : String.fromCharCode(0xE000 + i);
+              }).join());
+      final k = prot
           .replaceAll(numRe, '')
+          .replaceAll(RegExp(r'\s*\([<>≤≥]?[^()]*\)?\s*$'), '')
           .replaceAll(RegExp(r'\s+'), ' ')
           .replaceAll(' %', '')
+          .replaceAllMapped(RegExp('[\uE000-\uE009]'),
+              (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xE000 + 48))
           .trim();
       why[k] = (why[k] ?? 0) + 1;
     }
@@ -5313,14 +5404,16 @@ class _HomeState extends State<_Home> {
             ),
           ),
         Tooltip(
-          message: 'Ver en TradingView',
+          message:
+              _plane ? 'Gráfico guardado (modo avión)' : 'Ver en TradingView',
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => _openTradingView((r['ticker'] ?? '').toString()),
-            child: const Padding(
-              padding: EdgeInsets.only(left: 4),
+            onTap: () => _chartTap((r['ticker'] ?? '').toString(),
+                title: '${r['ticker'] ?? ''} · ${r['name'] ?? ''}', row: r),
+            child: Padding(
+              padding: const EdgeInsets.only(left: 4),
               child: Icon(Icons.candlestick_chart_outlined,
-                  size: 17, color: _cMuted),
+                  size: 17, color: _plane ? _kGreen : _cMuted),
             ),
           ),
         ),
@@ -7409,7 +7502,8 @@ class _HomeState extends State<_Home> {
           'Botones de arriba',
           '«Actualizar precios»: precios en directo de lo visible, cartera e índices (no '
               'recalcula el universo). Flecha circular: lo repite cada 2 minutos. Nube: vuelve a pasar todo el '
-              'screener en la nube con datos de ~15 min (tarda unos minutos).'
+              'screener en la nube con datos de ~15 min (tarda unos minutos) y, en la app del iPad, deja después '
+              'todo guardado para verlo sin conexión. Avión: activa el modo avión (se pone verde).'
         ],
         [
           'Columnas / Favoritos',
@@ -7418,19 +7512,21 @@ class _HomeState extends State<_Home> {
         ],
         [
           'Gráfico',
-          'Botones «1 año» (velas diarias) y «5 años» (velas semanales); el resto, con zoom '
+          'Botones «1 año» y «5 años», los dos con velas diarias; el resto, con zoom '
               '(pellizco o botones) y desplazamiento. Líneas: medias, entrada, stop, objetivo y, si lo tienes '
               'en cartera, tu precio medio («Pos»). Las estrellas de favoritos son distintas en Largos y en Cortos.'
         ],
         [
           'Gráficos sin conexión',
           'Solo en la app del iPad. Al abrir la app con conexión se descargan los '
-              'gráficos de cartera, favoritos y de los valores de tus filtros (actuales y anteriores). El botón '
-              'del avión descarga los de TODOS los valores: úsalo con wifi antes de viajar (unos 30 MB). La '
-              'columna «Gráfico offline» indica la fecha de la última vela guardada en la nube. El avión guarda '
-              'también las fichas de empresa de cartera y favoritos (y queda guardada la de cualquier valor que '
-              'abras con conexión) y el Seguimiento (vista original). Sin conexión no funcionan «Actualizar '
-              'precios», la nube ni la Simulación del Seguimiento.'
+              'gráficos de cartera, favoritos y de los valores de tus filtros (actuales y anteriores). La nube, '
+              'al terminar, descarga los de TODOS los valores e índices (unos 60 MB): úsala con wifi antes de '
+              'viajar. Guarda también las fichas de empresa de cartera y favoritos (y queda guardada la de '
+              'cualquier valor que abras con conexión) y el Seguimiento (vista original). Con el modo avión '
+              'activado (icono verde), el icono de gráfico de valores e índices abre el gráfico guardado en una '
+              'ventana grande; desactivado, abre TradingView. La columna «Gráfico offline» indica la fecha de la '
+              'última vela guardada. Sin conexión no funcionan «Actualizar precios», la nube ni la Simulación '
+              'del Seguimiento.'
         ],
       ],
     ],
@@ -7817,10 +7913,11 @@ class _HomeState extends State<_Home> {
     final actions = <Widget>[
       IconButton(
         tooltip:
-            'Descargar datos ahora (unos minutos; vela de hoy provisional)',
+            'Descargar datos ahora (unos minutos) y dejarlo todo guardado para verlo sin '
+            'conexión: gráficos de valores e índices, fichas de cartera y favoritos y Seguimiento',
         icon: Icon(Icons.cloud_download_outlined,
-            color: _jobRunning ? _cMuted : _cText),
-        onPressed: (_loading || _jobRunning) ? null : _runNow,
+            color: (_jobRunning || _dlBusy) ? _cMuted : _cText),
+        onPressed: (_loading || _jobRunning || _dlBusy) ? null : _runNow,
       ),
       if (_dlBusy)
         Padding(
@@ -7828,15 +7925,15 @@ class _HomeState extends State<_Home> {
           child: Text(
               _dlTotal == 0 ? '$_dlWhat…' : '$_dlWhat $_dlDone/$_dlTotal',
               style: const TextStyle(fontSize: 13, color: _kAmber)),
-        )
-      else
-        IconButton(
-          tooltip:
-              'Descargar todo para verlo sin conexión: gráficos de todos los valores, fichas de '
-              'cartera y favoritos y Seguimiento',
-          icon: const Icon(Icons.airplanemode_active, size: 21, color: _cText),
-          onPressed: _loading ? null : _downloadAll,
         ),
+      IconButton(
+        tooltip: _plane
+            ? 'Modo avión activado: el icono de gráfico abre el gráfico guardado (pulsa para desactivar)'
+            : 'Modo avión: el icono de gráfico abrirá el gráfico guardado, sin conexión',
+        icon: Icon(Icons.airplanemode_active,
+            size: 21, color: _plane ? _kGreen : _cText),
+        onPressed: _togglePlane,
+      ),
       if (_newData)
         Padding(
           padding: const EdgeInsets.only(right: 6),
@@ -8615,9 +8712,14 @@ class _HomeState extends State<_Home> {
       _GridCol(
           key: 'name',
           label: 'Mercado',
-          width: 300,
+          width: 330,
           bold: true,
-          text: (r) => r['name'].toString()),
+          text: (r) => r['name'].toString(),
+          // Los tipos (euríbor, €STR, SOFR) no cotizan: no tienen gráfico
+          trailing: (r) => r['src'] == 'rate'
+              ? const SizedBox.shrink()
+              : _chartIcon(r['sym'].toString(), r['name'].toString(),
+                  tv: _tvMacro[r['sym']])),
       _GridCol(
           key: 'price',
           label: 'Último',
@@ -8639,11 +8741,27 @@ class _HomeState extends State<_Home> {
     ];
     final rows =
         _gSorted('macro', List<Map<String, dynamic>>.of(_macro), def: '');
-    return _gGrid('macro', cols, rows,
-        def: '',
-        onTap: (r) =>
-            _openTradingView(_tvMacro[r['sym']] ?? r['sym'].toString()));
+    return _gGrid('macro', cols, rows, def: '', onTap: (r) {
+      if (r['src'] == 'rate') return;
+      _chartTap(r['sym'].toString(),
+          title: r['name'].toString(), tv: _tvMacro[r['sym']]);
+    });
   }
+
+  /// Icono de gráfico de las tablas de índices: guardado (modo avión) o TradingView.
+  Widget _chartIcon(String sym, String title, {String? tv}) => Tooltip(
+        message:
+            _plane ? 'Gráfico guardado (modo avión)' : 'Ver en TradingView',
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _chartTap(sym, title: title, tv: tv),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 6),
+            child: Icon(Icons.candlestick_chart_outlined,
+                size: 17, color: _plane ? _kGreen : _cMuted),
+          ),
+        ),
+      );
 
   static const List<Map<String, String>> _kMacroFut = [
     {'sym': 'ES=F', 'name': 'Futuro S&P 500', 'kind': 'idx'},
@@ -8658,8 +8776,10 @@ class _HomeState extends State<_Home> {
     '^GSPC': 'SP:SPX',
     '^VIX': 'CBOE:VIX',
     '^IRX': 'TVC:US03MY',
-    '2YY=F': 'TVC:US02Y',
     '^FVX': 'TVC:US05Y',
+    'TTF=F': 'ICEENDEX:TFM1!',
+    '^IBEX': 'BME:IBC',
+    '^GDAXI': 'XETR:DAX',
     '^TNX': 'TVC:US10Y',
     '^TYX': 'TVC:US30Y',
     'GC=F': 'COMEX:GC1!',
@@ -8721,9 +8841,12 @@ class _HomeState extends State<_Home> {
       _GridCol(
           key: '_name',
           label: 'Nombre',
-          width: 190,
+          width: 210,
           bold: true,
-          text: (r) => r['_name'].toString()),
+          text: (r) => r['_name'].toString(),
+          trailing: (r) => _chartIcon(
+              r['_etf'].toString(), '${r['_name']} (${r['_etf']})',
+              tv: _tvMacro[r['_etf']])),
       _GridCol(
           key: '_etf',
           label: 'ETF',
@@ -10149,6 +10272,247 @@ class _TextAskState extends State<_TextAsk> {
 
 // ----------------------------------------------------------------- ficha de empresa
 
+// ----------------------------------------------------------------- gráfico de 5 años (velas diarias)
+
+/// Reconstruye las velas diarias de 5 años a partir del formato compacto del job
+/// (t0 = primera fecha, s = escala, b = [días, apertura, máximo, mínimo, cierre] en enteros
+/// como diferencia con el cierre anterior) y las une con las del último año ([d1], que son
+/// más recientes y llevan volumen). Las medias se calculan aquí con toda la serie.
+Map<String, dynamic>? _chart5yFrom(
+    Map<String, dynamic>? d5, Map<String, dynamic>? d1) {
+  final dates = <String>[];
+  final o = <double>[],
+      h = <double>[],
+      l = <double>[],
+      c = <double>[],
+      v = <double>[];
+  String iso(DateTime t) =>
+      '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  final d1d =
+      ((d1?['d'] as List?) ?? const []).map((e) => e.toString()).toList();
+  final cut = d1d.isEmpty
+      ? null
+      : d1d.first; // desde aquí mandan las velas del último año
+  try {
+    final b = (d5?['b'] as List?) ?? const [];
+    final sc = _d(d5?['s']) ?? 100.0;
+    var t = DateTime.tryParse('${d5?['t0']}T00:00:00Z');
+    var pc = 0;
+    if (t != null && sc > 0) {
+      for (var i = 0; i + 4 < b.length; i += 5) {
+        t = t!.add(Duration(days: (b[i] as num).toInt()));
+        final day = iso(t);
+        final ci = pc + (b[i + 4] as num).toInt();
+        if (cut == null || day.compareTo(cut) < 0) {
+          dates.add(day);
+          o.add((pc + (b[i + 1] as num).toInt()) / sc);
+          h.add((pc + (b[i + 2] as num).toInt()) / sc);
+          l.add((pc + (b[i + 3] as num).toInt()) / sc);
+          c.add(ci / sc);
+          v.add(0.0);
+        }
+        pc = ci;
+      }
+    }
+  } catch (_) {}
+  if (d1 != null) {
+    List<double?> g(String k) => ((d1[k] as List?) ?? const [])
+        .map((e) => e is num ? e.toDouble() : null)
+        .toList();
+    final o1 = g('o'), h1 = g('h'), l1 = g('l'), c1 = g('c'), v1 = g('v');
+    for (var i = 0; i < d1d.length && i < c1.length; i++) {
+      final cc = c1[i];
+      if (cc == null) continue;
+      dates.add(d1d[i]);
+      o.add((i < o1.length ? o1[i] : null) ?? cc);
+      h.add((i < h1.length ? h1[i] : null) ?? cc);
+      l.add((i < l1.length ? l1[i] : null) ?? cc);
+      c.add(cc);
+      v.add((i < v1.length ? v1[i] : null) ?? 0.0);
+    }
+  }
+  if (c.length < 2) return null;
+  List<double> ema(int n) {
+    final a = 2 / (n + 1);
+    final out = <double>[];
+    var e = c.first;
+    for (final x in c) {
+      e = a * x + (1 - a) * e;
+      out.add(e);
+    }
+    return out;
+  }
+
+  return {
+    'd': dates,
+    'o': o,
+    'h': h,
+    'l': l,
+    'c': c,
+    'v': v,
+    'e20': ema(20),
+    'e50': ema(50),
+    'e100': ema(100),
+    'e200': ema(200),
+  };
+}
+
+Widget _chartLegend(Color c, String t) => Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(width: 14, height: 3, color: c),
+        const SizedBox(width: 4),
+        Text(t, style: const TextStyle(fontSize: 12, color: _cMuted)),
+      ]),
+    );
+
+/// Ventana grande con el gráfico guardado de un valor o índice (modo avión). Lee primero la
+/// copia del dispositivo y, si no la hay, la pide al servidor.
+class _ChartDialog extends StatefulWidget {
+  const _ChartDialog(
+      {required this.symbol,
+      required this.title,
+      this.entry,
+      this.stop,
+      this.target,
+      this.pos,
+      this.posQty = 0});
+  final String symbol;
+  final String title;
+  final double? entry, stop, target, pos;
+  final double posQty;
+
+  @override
+  State<_ChartDialog> createState() => _ChartDialogState();
+}
+
+class _ChartDialogState extends State<_ChartDialog> {
+  Map<String, dynamic>? _d1; // último año
+  Map<String, dynamic>? _all; // 5 años (diarias)
+  bool _loading = true;
+  bool _five = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDoc();
+  }
+
+  Future<void> _loadDoc() async {
+    final ref = cf.FirebaseFirestore.instance
+        .collection('screener_charts')
+        .doc(widget.symbol.replaceAll('/', '_'));
+    Map<String, dynamic>? m;
+    try {
+      m = (await ref.get(const cf.GetOptions(source: cf.Source.cache))).data();
+    } catch (_) {}
+    if (m == null || m['data'] is! String) {
+      try {
+        m = (await ref.get().timeout(const Duration(seconds: 12))).data();
+      } catch (_) {}
+    }
+    Map<String, dynamic>? d1, d5;
+    try {
+      final s = m?['data'];
+      if (s is String) d1 = Map<String, dynamic>.from(jsonDecode(s) as Map);
+      final s5 = m?['d5'];
+      if (s5 is String) d5 = Map<String, dynamic>.from(jsonDecode(s5) as Map);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _d1 = d1;
+      _all = d5 == null ? null : _chart5yFrom(d5, d1);
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final five = _five && _all != null;
+    final data = five ? _all : _d1;
+    final dl = (data?['d'] as List?) ?? const [];
+    final bars = ((data?['c'] as List?) ?? const []).length;
+    Widget rng(String t, bool f) => Padding(
+          padding: const EdgeInsets.only(left: 6),
+          child: ChoiceChip(
+            label: Text(t),
+            selected: five == f,
+            onSelected:
+                (f && _all == null) ? null : (_) => setState(() => _five = f),
+            visualDensity: VisualDensity.compact,
+          ),
+        );
+    return Dialog(
+      backgroundColor: _cPanel,
+      insetPadding: const EdgeInsets.all(10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: SizedBox(
+        width: size.width,
+        height: size.height,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 10, 10, 12),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Expanded(
+                child: Text(widget.title,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w600)),
+              ),
+              if (dl.isNotEmpty)
+                Text('velas diarias hasta el ${_fmtDate(dl.last.toString())}',
+                    style: const TextStyle(fontSize: 12, color: _cMuted)),
+              rng('1 año', false),
+              rng('5 años', true),
+              IconButton(
+                tooltip: 'Cerrar',
+                icon: const Icon(Icons.close, color: _cText),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ]),
+            Wrap(children: [
+              _chartLegend(_kEma20, 'EMA20'),
+              _chartLegend(_kEma50, 'EMA50'),
+              _chartLegend(_kEma100, 'EMA100'),
+              _chartLegend(_kEma200, 'EMA200'),
+              if (widget.entry != null) _chartLegend(_kLineEntry, 'Entrada'),
+              if (widget.stop != null) _chartLegend(_kLineStop, 'Stop'),
+              if (widget.target != null) _chartLegend(_kLineTarget, 'Objetivo'),
+              if (widget.pos != null)
+                _chartLegend(
+                    _kLinePos,
+                    'Mi posición (${widget.posQty < 0 ? 'corto' : 'largo'} '
+                    '${_num(widget.posQty.abs(), 0)} acc. a ${_num(widget.pos!, 2)})'),
+            ]),
+            const SizedBox(height: 6),
+            Expanded(
+              child: _loading
+                  ? const Center(
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : (data == null
+                      ? const Center(
+                          child: Text(
+                              'No hay gráfico guardado de este valor en el dispositivo. Con conexión, pulsa la '
+                              'nube para descargarlos todos.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: _cMuted)))
+                      : _CandleChartView(
+                          d: data,
+                          n: math.max(10, bars),
+                          entry: widget.entry,
+                          stop: widget.stop,
+                          target: widget.target,
+                          pos: widget.pos)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
 class _Detail extends StatefulWidget {
   const _Detail({
     super.key,
@@ -10190,8 +10554,10 @@ class _DetailState extends State<_Detail> {
       _chart; // velas guardadas por el job (también sin conexión)
   bool _chartLoading = true;
   bool _chart5y =
-      false; // false: 1 año (velas diarias); true: 5 años (semanales)
-  Map<String, dynamic>? _chartW; // velas semanales de 5 años
+      false; // false: 1 año; true: 5 años (los dos con velas diarias)
+  Map<String, dynamic>? _chartD5; // velas diarias de 5 años en formato compacto
+  Map<String, dynamic>?
+      _chartAll; // 5 años ya reconstruidos (se calcula una vez)
   String? _infoErr;
   bool _infoLoading = true;
 
@@ -10225,11 +10591,13 @@ class _DetailState extends State<_Detail> {
       setState(() {
         _infoLoading = false;
         // Gráfico generado (o actualizado) por la función: queda guardado para usarlo sin conexión
-        if (body['chart_w'] is Map) {
-          _chartW = Map<String, dynamic>.from(body['chart_w'] as Map);
+        if (body['chart_d5'] is Map) {
+          _chartD5 = Map<String, dynamic>.from(body['chart_d5'] as Map);
+          _chartAll = null;
         }
         if (body['chart'] is Map) {
           _chart = Map<String, dynamic>.from(body['chart'] as Map);
+          _chartAll = null;
           final dl = _chart!['d'];
           if (dl is List && dl.isNotEmpty) {
             widget.row['chart_off'] =
@@ -10631,15 +10999,16 @@ class _DetailState extends State<_Detail> {
           .doc(t.replaceAll('/', '_'))
           .get();
       final s = d.data()?['data'];
-      final sw = d.data()?['w'];
+      final sw = d.data()?['d5'];
       if (!mounted) return;
       setState(() {
         _chart = s is String
             ? Map<String, dynamic>.from(jsonDecode(s) as Map)
             : null;
-        _chartW = sw is String
+        _chartD5 = sw is String
             ? Map<String, dynamic>.from(jsonDecode(sw) as Map)
-            : _chartW;
+            : _chartD5;
+        _chartAll = null;
         _chartLoading = false;
       });
     } catch (_) {
@@ -10669,8 +11038,10 @@ class _DetailState extends State<_Detail> {
     final last = ((d['d'] as List?) ?? []).isEmpty
         ? ''
         : (d['d'] as List).last.toString();
-    final w5 = _chartW;
-    final weekly = _chart5y && w5 != null;
+    if (_chartD5 != null && _chartAll == null)
+      _chartAll = _chart5yFrom(_chartD5, d);
+    final w5 = _chartAll;
+    final weekly = _chart5y && w5 != null; // 5 años
     final data = (_chart5y && w5 != null) ? w5 : d;
     final bars = ((data['c'] as List?) ?? const []).length;
     Widget rng(String l, bool five) => Padding(
@@ -10684,14 +11055,7 @@ class _DetailState extends State<_Detail> {
             visualDensity: VisualDensity.compact,
           ),
         );
-    Widget leg(Color c, String t) => Padding(
-          padding: const EdgeInsets.only(right: 12),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Container(width: 14, height: 3, color: c),
-            const SizedBox(width: 4),
-            Text(t, style: const TextStyle(fontSize: 12, color: _cMuted)),
-          ]),
-        );
+    Widget leg(Color c, String t) => _chartLegend(c, t);
     // Mi posición en cartera (precio medio)
     final q = _d(widget.row['pf_qty']) ?? 0;
     final pos = q != 0 ? _d(widget.row['pf_cost']) : null;
@@ -10704,9 +11068,8 @@ class _DetailState extends State<_Detail> {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-                weekly
-                    ? 'velas semanales hasta el ${_fmtDate(last)}; medias aproximadas a las diarias'
-                    : 'velas diarias guardadas hasta el ${_fmtDate(last)}',
+                'velas diarias guardadas hasta el ${_fmtDate(last)}'
+                '${weekly ? ' (5 años: acerca con zoom y desplaza)' : ''}',
                 style: const TextStyle(fontSize: 12, color: _cMuted),
                 overflow: TextOverflow.ellipsis),
           ),
