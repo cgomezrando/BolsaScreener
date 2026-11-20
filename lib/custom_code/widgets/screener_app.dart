@@ -1132,6 +1132,13 @@ List<_Field> _buildFields() {
   n('hs_rr', 'Beneficio/riesgo martillo bajista', _cPat,
       w: 76, h: 'Beneficio/ riesgo');
 
+  n(
+      'pio',
+      'Piotroski F-Score (0–9): salud financiera según las cuentas anuales',
+      _cVal,
+      dec: 0,
+      w: 76,
+      h: 'Piotroski');
   n('pe', 'PER', _cVal, dec: 1, w: 62);
   n('fpe', 'PER forward', _cVal, dec: 1, w: 70);
   n('pe_vs_sec', 'PER / PER sector (x)', _cVal, h: 'PER / sector');
@@ -1271,6 +1278,11 @@ const Map<String, List<String>> _kDefaultCols = {
 };
 
 const Map<String, String> _kHelp = {
+  'pio': 'Nueve criterios de salud financiera con las cuentas anuales (último ejercicio frente al anterior), '
+      'un punto cada uno: beneficio positivo, caja operativa positiva, mejora del ROA, caja mayor que el '
+      'beneficio, menos deuda a largo plazo, más liquidez, sin emitir acciones, más margen bruto y más '
+      'rotación de activos. 7–9 = sólida; 0–3 = débil. Vacío si falta algún dato (bancos, aseguradoras, '
+      'REITs y algunas europeas). Se recalcula cada tres semanas. El desglose está en la ficha del valor.',
   'ent_state':
       'Solo con la sesión abierta y datos de hoy. Compara el precio actual con la entrada del plan '
           '(máximo o mínimo de la vela CERRADA de ayer, no la de hoy): en espera = aún no la alcanza; activada = '
@@ -1650,6 +1662,16 @@ const List<_RuleSpec> _kRuleSpecs = [
           'Evita entrar estirado. Cuenta la distancia del cierre a la EMA20, por encima o por debajo.'),
   _RuleSpec('rsi_max', 'RSI diario máximo', 'RSI ≤ {v}', only: 'long'),
   _RuleSpec('rsi_min', 'RSI diario mínimo', 'RSI ≥ {v}', only: 'short'),
+  _RuleSpec('pio_min', 'Piotroski mínimo (empresa sólida)', 'Piotroski ≥ {v}',
+      only: 'long',
+      help:
+          'Descarta las empresas con una nota de Piotroski (0–9) más baja. Las que no tienen nota '
+          '(bancos, aseguradoras, REITs…) no se descartan.'),
+  _RuleSpec('pio_max', 'Piotroski máximo (empresa débil)', 'Piotroski ≤ {v}',
+      only: 'short',
+      help:
+          'Deja solo las empresas con una nota de Piotroski (0–9) igual o más baja. Las que no tienen '
+          'nota (bancos, aseguradoras, REITs…) no se descartan.'),
   _RuleSpec('wick', 'Última vela con la mecha a favor más larga',
       'Última vela: mecha a favor más larga',
       hasValue: false,
@@ -1746,6 +1768,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'ema': _Rule(true, 0),
         'ext20': _Rule(true, 2),
         'rsi_max': _Rule(true, 70),
+        'pio_min': _Rule(false, 6),
         'wick': _Rule(true, 0),
         'hammer': _Rule(false, 0),
         'touch20': _Rule(true, 0),
@@ -1770,6 +1793,7 @@ Map<String, Map<String, _Rule>> _defaultRules() => {
         'ema': _Rule(true, 0),
         'ext20': _Rule(false, 2),
         'rsi_min': _Rule(true, 30),
+        'pio_max': _Rule(false, 4),
         'wick': _Rule(false, 0),
         'hammer': _Rule(true, 0),
         'touch20': _Rule(true, 0),
@@ -2237,6 +2261,11 @@ Color? _colorFor(_Field f, dynamic v) {
   }
   if (f.key == 'figure')
     return v.toString().startsWith('doble suelo') ? _kGreen : _kRed;
+  if (f.key == 'pio') {
+    final x = v is num ? v.toDouble() : null;
+    if (x != null && x >= 7) return _kGreen;
+    if (x != null && x <= 3) return _kRed;
+  }
   if (f.key == 'ent_state') {
     if (v == 'activada') return _kGreen;
     if (v == 'superada') return _kAmber;
@@ -2695,6 +2724,7 @@ class _HomeState extends State<_Home> {
     _ensurePre();
     _ensurePreScore();
     _ensureEntState();
+    _ensurePio();
     _ensure1w();
     _save();
     _riskCtl.text = _plain(_riskM);
@@ -4482,6 +4512,14 @@ class _HomeState extends State<_Home> {
       if (rsiMin != null && rs < rsiMin)
         return 'RSI ${_num(rs, 0)} (< ${n0(rsiMin)})';
     }
+    // Piotroski: sin nota (bancos, REITs…) no se descarta
+    final pio = g('pio');
+    final pioMin = long ? on('pio_min') : null;
+    final pioMax = long ? null : on('pio_max');
+    if (pio != null && pioMin != null && pio < pioMin)
+      return 'Piotroski ${_num(pio, 0)} (< ${n0(pioMin)})';
+    if (pio != null && pioMax != null && pio > pioMax)
+      return 'Piotroski ${_num(pio, 0)} (> ${n0(pioMax)})';
     final wantWick = on('wick') != null;
     final wantHammer = on('hammer') != null;
     if (wantWick || wantHammer) {
@@ -5111,6 +5149,22 @@ class _HomeState extends State<_Home> {
       }
     }
     p.setBool('scr_prescore_v1', true);
+  }
+
+  /// Añade una vez la columna «Piotroski» (tras la puntuación) en Largos y Cortos.
+  void _ensurePio() {
+    final p = _prefs;
+    if (p == null || (p.getBool('scr_pio_v1') ?? false)) return;
+    for (final l in [_cols['long']!, _cols['short']!]) {
+      if (l.contains('pio')) continue;
+      final i = l.indexOf('score');
+      if (i >= 0) {
+        l.insert(i + 1, 'pio');
+      } else {
+        l.add('pio');
+      }
+    }
+    p.setBool('scr_pio_v1', true);
   }
 
   /// Añade una vez «Entrada hoy» tras «Entrada» en Largos y Cortos.
@@ -6025,7 +6079,8 @@ class _HomeState extends State<_Home> {
     'sec_etf',
     'home_idx',
     'cur',
-    'dte'
+    'dte',
+    'pio'
   ];
 
   static List<List<dynamic>> _sigRows(List<Map<String, dynamic>> rows) => rows
@@ -6053,6 +6108,7 @@ class _HomeState extends State<_Home> {
                 : 'SPY',
             r['currency'],
             r['days_to_earn'],
+            r['pio'],
           ])
       .toList();
 
@@ -6797,6 +6853,7 @@ class _HomeState extends State<_Home> {
           '${out?['n'] ?? ''}',
           n(rr, 3),
           '${r['setup'] ?? ''}',
+          '${r['pio'] ?? ''}',
         ].join('\t'));
       }
     }
@@ -6862,6 +6919,7 @@ class _HomeState extends State<_Home> {
       'sesiones',
       'r_neto',
       'estado',
+      'piotroski',
     ].join('\t'));
     for (final l in table) {
       b.writeln(l);
@@ -10270,6 +10328,7 @@ String _discardGroup(String d) {
   if (d.startsWith('a ') && d.contains('de la EMA20'))
     return 'a más de $thr de la EMA20';
   if (d.startsWith('RSI ')) return 'RSI $cmp $thr';
+  if (d.startsWith('Piotroski ')) return 'Piotroski $cmp $thr';
   if (d.startsWith('última vela sin'))
     return d.replaceAll(RegExp(r'\s*\([^)]*\)\s*$'), '');
   if (d.startsWith('última vela: mecha')) {
@@ -11189,6 +11248,71 @@ class _DetailState extends State<_Detail> {
     );
   }
 
+  /// Desglose de los nueve criterios de Piotroski (cumple / no cumple / sin dato).
+  Widget? _pioBreakdown(Map<String, dynamic> r) {
+    final c = r['pio_c']?.toString() ?? '';
+    if (c.length != 9 || !c.contains(RegExp('[01]'))) return null;
+    const names = [
+      'Beneficio neto positivo',
+      'Caja operativa positiva',
+      'Mejora la rentabilidad sobre activos (ROA)',
+      'Caja operativa mayor que el beneficio',
+      'Baja la deuda a largo plazo sobre activos',
+      'Sube la liquidez corriente',
+      'No ha emitido acciones',
+      'Sube el margen bruto',
+      'Sube la rotación de activos',
+    ];
+    final f = r['pio'];
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        decoration: BoxDecoration(
+          color: _cSurface,
+          border: Border.all(color: _cBorder),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(
+              f == null
+                  ? 'Piotroski: sin nota (faltan datos en las cuentas; habitual en bancos, aseguradoras y REITs)'
+                  : 'Piotroski ${f is num ? f.toInt() : f} de 9 · cuentas anuales, último ejercicio '
+                      'frente al anterior',
+              style:
+                  const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 22, runSpacing: 6, children: [
+            for (var i = 0; i < 9; i++)
+              SizedBox(
+                width: 330,
+                child: Row(children: [
+                  Icon(
+                      c[i] == '1'
+                          ? Icons.check_circle_outline
+                          : (c[i] == '0'
+                              ? Icons.cancel_outlined
+                              : Icons.remove_circle_outline),
+                      size: 17,
+                      color: c[i] == '1'
+                          ? _kGreen
+                          : (c[i] == '0' ? _kRed : _cMuted)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                        '${names[i]}${c[i] == '-' ? ' (sin dato)' : ''}',
+                        style: TextStyle(
+                            fontSize: 13,
+                            color: c[i] == '-' ? _cMuted : _cText)),
+                  ),
+                ]),
+              ),
+          ]),
+        ]),
+      ),
+    );
+  }
+
   Widget _kv(String k, String v, {Color? color}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
@@ -11667,6 +11791,10 @@ class _DetailState extends State<_Detail> {
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
       ));
       sections.add(_equalRows(tiles));
+      if (cat == _cVal) {
+        final pio = _pioBreakdown(r);
+        if (pio != null) sections.add(pio);
+      }
     }
     return DraggableScrollableSheet(
       expand: false,
